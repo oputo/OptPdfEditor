@@ -95,6 +95,7 @@
 
   .acts{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:10px}
   .acts .sep{width:1px;height:20px;background:var(--line)}
+  .acts .grp{display:flex;gap:6px}
   .summary{margin-top:6px;font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
   .summary b{color:var(--ink)}
   .pnote{margin-top:10px;min-height:1.4em;font-size:13px;color:var(--muted)}
@@ -132,6 +133,20 @@
   .status.err{color:var(--warn)}
   .status.ok{color:#1F6E3A}
 
+  /* 並べ替え */
+  .chip[draggable="true"]{cursor:grab}
+  .chip.moving{opacity:.35}
+  .chip.over-left{box-shadow:inset 3px 0 0 var(--accent)}
+  .chip.over-right{box-shadow:inset -3px 0 0 var(--accent)}
+
+  .out select{
+    font:inherit;font-size:13px;padding:7px 8px;border:1px solid var(--line);
+    border-radius:4px;background:var(--sheet);color:var(--ink);
+  }
+  .out #splitArg{flex:0 1 240px;min-width:160px;font-size:13px;padding:7px 9px}
+  .splitinfo{margin-top:8px;font-size:13px;color:var(--muted)}
+  .splitinfo.err{color:var(--warn);font-weight:700}
+
   @media (max-width:860px){
     .cols{grid-template-columns:1fr}
     .viewer iframe{height:320px}
@@ -142,7 +157,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>ページ編集<span class="ver">rev.4</span></h1>
+    <h1>ページ編集<span class="ver">rev.5</span></h1>
     <div class="count" id="count"></div>
   </header>
 
@@ -156,7 +171,7 @@
   <div class="drop-wrap" id="dropWrap">
     <div class="drop" id="drop" tabindex="0" role="button" aria-label="PDFを読み込む">
       <strong>PDFをここにドロップ</strong>
-      <span>またはクリックして選択（1ファイル）。ページの削除と90°単位の回転ができます。</span>
+      <span>またはクリックして選択（1ファイル）。ページの削除・回転・並べ替え・抽出ができます。</span>
     </div>
     <input type="file" id="picker" accept="application/pdf,.pdf" hidden>
   </div>
@@ -171,7 +186,10 @@
       <section class="panel">
         <div class="panel-head">
           <h2>ページ</h2>
-          <div class="hint">1回目＝起点／同じページをもう一度＝単独選択／別ページ＝範囲選択<br>番号はプレビューの表示内容に合わせて振り直されます</div>
+          <div class="hint">
+            1回目＝起点／同じページをもう一度＝単独選択／別ページ＝範囲選択<br>
+            ドラッグで並べ替え。番号はプレビューの表示内容に合わせて振り直されます
+          </div>
         </div>
         <div class="rangebar">
           <input id="rangeInput" type="text" placeholder="例: 2, 5-8, 12" spellcheck="false">
@@ -188,6 +206,8 @@
           <button id="rot180">⟳ 180°</button>
           <button id="rot270">⟳ 270°</button>
           <button id="rot0">回転を戻す</button>
+          <span class="sep"></span>
+          <span class="grp"><button id="moveUp">◀ 前へ</button><button id="moveDown">後ろへ ▶</button></span>
           <span class="sep"></span>
           <button id="resetAll">全変更を取消</button>
         </div>
@@ -210,10 +230,19 @@
     </div>
 
     <div class="out">
-      <label for="outName">保存名</label>
+      <label for="outMode">書き出し</label>
+      <select id="outMode">
+        <option value="all">残った全ページを1ファイル</option>
+        <option value="sel">選択ページだけを1ファイル</option>
+        <option value="every">Nページごとに分割</option>
+        <option value="at">指定位置で分割</option>
+      </select>
+      <input id="splitArg" type="text" spellcheck="false" hidden>
+      <label for="outName" id="outNameLabel">保存名</label>
       <input id="outName" type="text" spellcheck="false">
       <button class="primary" id="save">保存</button>
     </div>
+    <div class="splitinfo" id="splitinfo"></div>
   </div>
 
   <div class="status" id="status" role="status" aria-live="polite"></div>
@@ -226,16 +255,18 @@
   const $ = id => document.getElementById(id);
   const statusEl = $('status');
 
+  /* ページは配列の「順序」が出力順。各要素は元PDFのどのページかを src で持つ。
+     選択や起点はオブジェクト参照で持つので、並べ替えても壊れない。 */
   let srcBytes = null;      // Uint8Array（元PDF、変更しない）
   let srcName  = '';
-  let pages    = [];        // {origRot, rot, del}
-  let sel      = new Set(); // 0-based の選択
+  let pages    = [];        // [{src, origRot, rot, del}]
+  let sel      = new Set(); // ページオブジェクトの集合
   let anchor   = null;      // 1クリック目の起点
   let cursor   = null;      // 最後にクリックしたページ
   let srcUrl   = null;      // 元PDFの blob URL
   let outUrl   = null;      // 編集結果の blob URL
-  let mode     = 'out';   // 既定は編集結果
-  let outDirty = true;      // 編集結果の作り直しが必要か
+  let mode     = 'out';     // 既定は編集結果
+  let outDirty = true;
 
   const setStatus = (msg, kind = '') => {
     statusEl.textContent = msg;
@@ -247,28 +278,31 @@
     el.textContent = msg;
     el.className = 'pnote' + (kind ? ' ' + kind : '');
   };
+  const setVNote = msg => { $('vnote').textContent = msg; };
 
   /* ---------- ページ番号 ----------
-     内部では常に「元PDFの 0-based index」で持つ。
-     画面に出す番号だけを、いまプレビューしている側の番号に合わせる。
-     - 元のPDF   : 1..元のページ数
-     - 編集結果  : 1..残るページ数（削除したページは番号なし＝「−」） */
-  function outNumbers() {
-    const a = new Array(pages.length).fill(null);
-    let n = 0;
-    pages.forEach((p, i) => { if (!p.del) a[i] = ++n; });
-    return a;
-  }
+     内部は常にページオブジェクト。画面に出す番号だけを、
+     いまプレビューしている側の番号に合わせる。
+     - 元のPDF  : 元PDFでのページ番号（並べ替えても変わらない）
+     - 編集結果 : 出力順での連番（削除したページは番号なし＝「−」） */
+  const kept = () => pages.filter(p => !p.del);
 
-  // 表示番号 → 元PDFの index
-  function numberMap() {
+  function outNumbers() {
     const m = new Map();
-    if (mode === 'src') pages.forEach((_, i) => m.set(i + 1, i));
-    else outNumbers().forEach((v, i) => { if (v != null) m.set(v, i); });
+    let n = 0;
+    for (const p of pages) if (!p.del) m.set(p, ++n);
     return m;
   }
 
-  /* 「2, 5-8, 12」を、いま表示中の番号として解釈して index 集合にする */
+  // 表示番号 → ページオブジェクト
+  function numberMap() {
+    const m = new Map();
+    if (mode === 'src') pages.forEach(p => m.set(p.src + 1, p));
+    else outNumbers().forEach((v, p) => m.set(v, p));
+    return m;
+  }
+
+  /* 「2, 5-8, 12」を、いま表示中の番号として解釈する */
   function parseRanges(text) {
     const map = numberMap();
     const max = map.size;
@@ -281,9 +315,21 @@
       let a = +m[1], b = m[2] ? +m[2] : a;
       if (a > b) [a, b] = [b, a];
       if (a < 1 || b > max) { bad.push(raw); continue; }
-      for (let k = a; k <= b; k++) { const i = map.get(k); if (i != null) out.add(i); }
+      for (let k = a; k <= b; k++) { const p = map.get(k); if (p) out.add(p); }
     }
     return { set: out, bad, max };
+  }
+
+  // 分割位置などの単純な番号リスト
+  function parseNums(text, max) {
+    const out = new Set(); const bad = [];
+    for (const raw of text.split(/[,、\s]+/)) {
+      if (!raw) continue;
+      const n = /^\d+$/.test(raw) ? +raw : NaN;
+      if (!Number.isFinite(n) || n < 1 || n > max) { bad.push(raw); continue; }
+      out.add(n);
+    }
+    return { nums: [...out].sort((a, b) => a - b), bad };
   }
 
   /* ---------- 読み込み ---------- */
@@ -302,7 +348,12 @@
 
       srcBytes = bytes;
       srcName  = file.name;
-      pages = doc.getPages().map(p => ({ origRot: ((p.getRotation().angle % 360) + 360) % 360, rot: 0, del: false }));
+      pages = doc.getPages().map((p, i) => ({
+        src: i,
+        origRot: ((p.getRotation().angle % 360) + 360) % 360,
+        rot: 0,
+        del: false,
+      }));
       sel.clear(); anchor = null; cursor = null;
 
       revoke();
@@ -328,79 +379,159 @@
     if (srcUrl) { URL.revokeObjectURL(srcUrl); srcUrl = null; }
   }
 
+  /* ---------- 並べ替え ---------- */
+  // movers を、非選択ページのうち at 番目の位置に差し込む
+  function placeAt(movers, rest, at) {
+    pages = [...rest.slice(0, at), ...movers, ...rest.slice(at)];
+    afterEdit();
+  }
+
+  // ドラッグ中のページを含む「動かす集合」を決める
+  function moverSetFor(p) {
+    return (sel.has(p) && sel.size > 1) ? pages.filter(q => sel.has(q)) : [p];
+  }
+
+  function dropOn(target, before) {
+    const movers = moverSetFor(dragging);
+    const mset = new Set(movers);
+    if (mset.has(target)) return;                 // 自分自身の上に落とした
+    const rest = pages.filter(q => !mset.has(q));
+    const r = rest.indexOf(target);
+    placeAt(movers, rest, before ? r : r + 1);
+    setNote(`${movers.length}ページを移動しました。`, 'ok');
+  }
+
+  function nudge(dir) {
+    const movers = pages.filter(p => sel.has(p));
+    if (!movers.length) { setNote('ページが選択されていません。', 'err'); return; }
+    const rest = pages.filter(p => !sel.has(p));
+    if (!rest.length) { setNote('すべて選択されているため移動できません。', 'err'); return; }
+    const first = pages.indexOf(movers[0]);
+    const last  = pages.indexOf(movers[movers.length - 1]);
+    let at;
+    if (dir < 0) {
+      let j = first - 1;
+      while (j >= 0 && sel.has(pages[j])) j--;
+      if (j < 0) { setNote('これ以上前には移動できません。', 'err'); return; }
+      at = rest.indexOf(pages[j]);
+    } else {
+      let j = last + 1;
+      while (j < pages.length && sel.has(pages[j])) j++;
+      if (j >= pages.length) { setNote('これ以上後ろには移動できません。', 'err'); return; }
+      at = rest.indexOf(pages[j]) + 1;
+    }
+    placeAt(movers, rest, at);
+    setNote(movers.length > 1
+      ? `${movers.length}ページをまとめて${dir < 0 ? '前' : '後ろ'}へ移動しました（離れた選択はここで連続になります）。`
+      : `1ページを${dir < 0 ? '前' : '後ろ'}へ移動しました。`, 'ok');
+  }
+
+  const reordered = () => pages.some((p, i) => p.src !== i);
+
   /* ---------- 表示 ---------- */
+  let dragging = null;
+
   function render() {
     const chips = $('chips');
     const no = outNumbers();
     chips.innerHTML = '';
-    pages.forEach((p, i) => {
+    pages.forEach(p => {
       const b = document.createElement('button');
       b.type = 'button';
-      b.className = 'chip' + (sel.has(i) ? ' sel' : '') + (p.del ? ' del' : '')
-                  + (anchor === i ? ' anchor' : '');
-      b.textContent = mode === 'src' ? String(i + 1) : (no[i] == null ? '−' : String(no[i]));
-      b.setAttribute('aria-pressed', sel.has(i) ? 'true' : 'false');
-      b.title = `元のPDF ${i + 1}ページ`
-        + (p.del ? ' / 削除' : ` / 編集結果 ${no[i]}ページ目`)
+      b.draggable = true;
+      b.className = 'chip' + (sel.has(p) ? ' sel' : '') + (p.del ? ' del' : '')
+                  + (anchor === p ? ' anchor' : '');
+      b.textContent = mode === 'src' ? String(p.src + 1) : (no.has(p) ? String(no.get(p)) : '−');
+      b.setAttribute('aria-pressed', sel.has(p) ? 'true' : 'false');
+      b.title = `元のPDF ${p.src + 1}ページ`
+        + (p.del ? ' / 削除' : ` / 編集結果 ${no.get(p)}ページ目`)
         + (p.rot ? ` / ${p.rot}°回転` : '');
       if (p.rot) {
         const r = document.createElement('span');
         r.className = 'rot'; r.textContent = p.rot + '°';
         b.appendChild(r);
       }
+
       // 1回目＝起点 / 同じページをもう一度＝単独選択 / 別ページ＝範囲選択 / 選択済み＝解除
       b.addEventListener('click', () => {
-        if (sel.has(i)) {
-          sel.delete(i); anchor = null;
+        if (sel.has(p)) {
+          sel.delete(p); anchor = null;
         } else if (anchor === null) {
-          anchor = i;
-        } else if (anchor === i) {
-          sel.add(i); anchor = null;
+          anchor = p;
+        } else if (anchor === p) {
+          sel.add(p); anchor = null;
         } else {
-          const [a, z] = anchor < i ? [anchor, i] : [i, anchor];
-          for (let k = a; k <= z; k++) sel.add(k);
+          const a = pages.indexOf(anchor), z = pages.indexOf(p);
+          const [x, y] = a < z ? [a, z] : [z, a];
+          for (let k = x; k <= y; k++) sel.add(pages[k]);
           anchor = null;
         }
-        cursor = i;
+        cursor = p;
         setNote('');
         render();
-        jumpTo(i);
+        jumpTo(p);
       });
+
+      // ドラッグで並べ替え
+      b.addEventListener('dragstart', e => {
+        dragging = p;
+        e.dataTransfer.setData('text/x-page', '1');
+        e.dataTransfer.effectAllowed = 'move';
+        b.classList.add('moving');
+      });
+      b.addEventListener('dragend', () => { dragging = null; render(); });
+      b.addEventListener('dragover', e => {
+        if (!dragging) return;
+        e.preventDefault();
+        const r = b.getBoundingClientRect();
+        const before = e.clientX < r.left + r.width / 2;
+        b.classList.toggle('over-left', before);
+        b.classList.toggle('over-right', !before);
+      });
+      b.addEventListener('dragleave', () => b.classList.remove('over-left', 'over-right'));
+      b.addEventListener('drop', e => {
+        if (!dragging) return;
+        e.preventDefault(); e.stopPropagation();
+        const r = b.getBoundingClientRect();
+        dropOn(p, e.clientX < r.left + r.width / 2);
+      });
+
       chips.appendChild(b);
     });
 
-    const del = pages.filter(p => p.del).length;
-    const rot = pages.filter(p => !p.del && p.rot).length;
-    const keep = pages.length - del;
-    $('count').textContent = pages.length ? `${pages.length}ページ → ${keep}ページ` : '';
+    const nDel = pages.filter(p => p.del).length;
+    const nRot = pages.filter(p => !p.del && p.rot).length;
+    const nKeep = pages.length - nDel;
+    $('count').textContent = pages.length ? `${pages.length}ページ → ${nKeep}ページ` : '';
     $('summary').innerHTML =
-      `選択 <b>${sel.size}</b> ページ ／ 削除 <b>${del}</b> ページ ／ 回転 <b>${rot}</b> ページ ／ 出力 <b>${keep}</b> ページ`;
-    $('save').disabled = !keep;
-    $('modeOut').disabled = !keep;
+      `選択 <b>${sel.size}</b> ／ 削除 <b>${nDel}</b> ／ 回転 <b>${nRot}</b> ／ 並べ替え <b>${reordered() ? 'あり' : 'なし'}</b> ／ 出力 <b>${nKeep}</b> ページ`;
+    $('modeOut').disabled = !nKeep;
+    updateOut();
   }
 
-  /* 操作の適用。
-     skipDeleted=true の操作（回転）は削除済みページを対象から外す。
-     対象が0件ならその場で理由を出し、状態は変えない。 */
+  function afterEdit() {
+    outDirty = true;
+    render();
+    if (mode === 'out') refreshOut();
+  }
+
+  /* 操作の適用。skipDeleted=true の操作（回転）は削除済みページを対象から外す。 */
   function apply(fn, label, skipDeleted = false) {
     if (!sel.size) {
       setNote('ページが選択されていません。ページ番号をクリックして選んでください。', 'err');
       return;
     }
-    const targets = [...sel].filter(i => !(skipDeleted && pages[i].del));
+    const targets = [...sel].filter(p => !(skipDeleted && p.del));
     if (!targets.length) {
       setNote('選択されているのは削除済みのページだけです。先に「削除を取消」するか、別のページを選んでください。', 'err');
       return;
     }
-    targets.forEach(i => fn(pages[i]));
+    targets.forEach(fn);
     const skipped = sel.size - targets.length;
-    // 操作後は選択を解除する（直前の選択が次の操作に紛れ込むのを防ぐ）
-    sel.clear(); anchor = null;
-    outDirty = true;
-    render();
+    sel.clear(); anchor = null;   // 直前の選択が次の操作に紛れ込むのを防ぐ
+    afterEdit();
     setNote(`${targets.length}ページを${label}しました。`
       + (skipped ? `（削除済みの${skipped}ページは対象外）` : ''), 'ok');
-    if (mode === 'out') refreshOut();
   }
 
   /* ---------- プレビュー ---------- */
@@ -411,33 +542,31 @@
     $('view').src = `${url}#page=${n}&navpanes=0&view=FitH`;
   }
 
-  const setVNote = msg => { $('vnote').textContent = msg; };
-
-  function jumpTo(i) {
-    if (i == null) { showPage(1); setVNote(baseVNote()); return; }
+  function jumpTo(p) {
+    if (!p) { showPage(1); setVNote(baseVNote()); return; }
     if (mode === 'src') {
-      showPage(i + 1);
-      setVNote(`${i + 1} ページ目を表示しています。` + baseVNote());
+      showPage(p.src + 1);
+      setVNote(`${p.src + 1} ページ目を表示しています。` + baseVNote());
       return;
     }
     const no = outNumbers();
-    if (no[i] != null) {
-      showPage(no[i]);
-      setVNote(`${no[i]} ページ目を表示しています。` + baseVNote());
+    if (no.has(p)) {
+      showPage(no.get(p));
+      setVNote(`${no.get(p)} ページ目を表示しています。` + baseVNote());
       return;
     }
     let n = 0;
-    for (let k = 0; k <= i; k++) if (!pages[k].del) n++;
+    for (const q of pages) { if (!q.del) n++; if (q === p) break; }
     n = Math.max(1, n);
     showPage(n);
-    setVNote(`このページは削除するので編集結果にはありません（元のPDFでは ${i + 1} ページ目）。`
+    setVNote(`このページは削除するので編集結果にはありません（元のPDFでは ${p.src + 1} ページ目）。`
       + `手前の ${n} ページ目を表示しています。`);
   }
 
   function baseVNote() {
     return mode === 'src'
-      ? '編集前の元PDFです。左のページ番号も元PDFの番号です。'
-      : '削除・回転を適用した結果です。左のページ番号は編集結果の番号と一致します（削除するページは − ）。';
+      ? '編集前の元PDFです。左のページ番号も元PDFの番号で、並べ替えの影響を受けません。'
+      : '削除・回転・並べ替えを適用した結果です。左のページ番号は編集結果の番号と一致します（削除するページは − ）。';
   }
 
   function setMode(m) {
@@ -448,21 +577,21 @@
     if (m === 'out') refreshOut(); else jumpTo(cursor);
   }
 
-  async function build() {
-    const keep = pages.map((p, i) => ({ p, i })).filter(x => !x.p.del);
-    if (!keep.length) throw new Error('残るページがありません');
+  /* ---------- 組み立て ---------- */
+  async function buildFrom(list) {
+    if (!list.length) throw new Error('ページがありません');
     const src = await PDFDocument.load(srcBytes, { ignoreEncryption: true });
     const out = await PDFDocument.create();
-    const copied = await out.copyPages(src, keep.map(x => x.i));
+    const copied = await out.copyPages(src, list.map(p => p.src));
     copied.forEach((pg, k) => {
-      const st = keep[k].p;
+      const st = list[k];
       if (st.rot) pg.setRotation(degrees((st.origRot + st.rot) % 360));
       out.addPage(pg);
     });
     return await out.save();
   }
 
-  const hasEdits = () => pages.some(p => p.del || p.rot);
+  const hasEdits = () => pages.some(p => p.del || p.rot) || reordered();
 
   async function refreshOut() {
     if (!hasEdits()) {   // 変更がないうちは元PDFをそのまま見せる（毎回組み直さない）
@@ -473,7 +602,7 @@
     if (!outDirty && outUrl && outUrl !== srcUrl) { jumpTo(cursor); return; }
     setStatus('プレビューを作成中…');
     try {
-      const bytes = await build();
+      const bytes = await buildFrom(kept());
       if (outUrl && outUrl !== srcUrl) URL.revokeObjectURL(outUrl);
       outUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
       outDirty = false;
@@ -484,13 +613,75 @@
     }
   }
 
+  /* ---------- 書き出しの単位 ---------- */
+  // 出力を「ファイルごとのページ配列」に切り分ける
+  function chunks() {
+    const k = kept();
+    const m = $('outMode').value;
+    if (m === 'sel') {
+      const s = k.filter(p => sel.has(p));
+      return { list: s.length ? [s] : [], err: s.length ? '' : '選択されている（削除されていない）ページがありません。' };
+    }
+    if (m === 'every') {
+      const n = parseInt($('splitArg').value, 10);
+      if (!Number.isFinite(n) || n < 1) return { list: [], err: '1以上の数を入力してください。' };
+      const out = [];
+      for (let i = 0; i < k.length; i += n) out.push(k.slice(i, i + n));
+      return { list: out, err: '' };
+    }
+    if (m === 'at') {
+      const { nums, bad } = parseNums($('splitArg').value, k.length);
+      if (bad.length) return { list: [], err: `解釈できない指定: ${bad.join(', ')}（1〜${k.length}）` };
+      const cuts = nums.filter(n => n > 1);
+      if (!cuts.length) return { list: [], err: '区切り位置を指定してください（例: 10, 25, 60）。' };
+      const out = []; let start = 0;
+      for (const c of cuts) { out.push(k.slice(start, c - 1)); start = c - 1; }
+      out.push(k.slice(start));
+      return { list: out.filter(c => c.length), err: '' };
+    }
+    return { list: k.length ? [k] : [], err: k.length ? '' : '残るページがありません。' };
+  }
+
+  function updateOut() {
+    const m = $('outMode').value;
+    const split = (m === 'every' || m === 'at');
+    $('splitArg').hidden = !split;
+    $('splitArg').placeholder = m === 'every' ? '例: 10（ページごと）' : '例: 10, 25, 60（この番号の前で区切る）';
+    $('outNameLabel').textContent = split ? '保存名の先頭' : '保存名';
+
+    const { list, err } = chunks();
+    const info = $('splitinfo');
+    if (err) { info.className = 'splitinfo err'; info.textContent = err; }
+    else if (list.length > 1) {
+      const no = outNumbers();
+      const ranges = list.map(c => {
+        const a = no.get(c[0]), b = no.get(c[c.length - 1]);
+        return a === b ? `${a}` : `${a}–${b}`;
+      });
+      info.className = 'splitinfo';
+      info.textContent = `${list.length}ファイルに分かれます（${ranges.slice(0, 8).join(' / ')}${ranges.length > 8 ? ' / …' : ''}）。保存先フォルダを選びます。`;
+    } else if (list.length === 1) {
+      info.className = 'splitinfo';
+      info.textContent = `${list[0].length}ページを1ファイルとして書き出します。`;
+    } else { info.className = 'splitinfo'; info.textContent = ''; }
+    $('save').disabled = !list.length;
+  }
+
   /* ---------- 保存 ---------- */
-  async function save() {
+  function outBase() {
     let name = $('outName').value.trim() || 'edited.pdf';
-    if (!/\.pdf$/i.test(name)) name += '.pdf';
+    return name.replace(/\.pdf$/i, '');
+  }
+
+  async function save() {
+    const { list, err } = chunks();
+    if (err || !list.length) { setStatus(err || '書き出すページがありません。', 'err'); return; }
     $('save').disabled = true;
     try {
-      // ブラウザは「クリック直後」でないとファイル選択ダイアログを開けないため、保存先を先に決める
+      // ブラウザは「クリック直後」でないと保存ダイアログを開けないため、保存先を先に決める
+      if (list.length > 1) { await saveMany(list); return; }
+
+      const name = outBase() + '.pdf';
       let handle = null;
       if (window.showSaveFilePicker) {
         try {
@@ -504,26 +695,51 @@
         }
       }
       setStatus('書き出し中…');
-      const bytes = await build();
-      const blob = new Blob([bytes], { type: 'application/pdf' });
-      const keep = pages.filter(p => !p.del).length;
-
+      const blob = new Blob([await buildFrom(list[0])], { type: 'application/pdf' });
       if (handle) {
         const w = await handle.createWritable();
         await w.write(blob); await w.close();
-        setStatus(`${handle.name} を保存しました（${keep}ページ）。`, 'ok');
+        setStatus(`${handle.name} を保存しました（${list[0].length}ページ）。`, 'ok');
         return;
       }
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob); a.download = name;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-      setStatus(`${name} をダウンロードしました（${keep}ページ）。`, 'ok');
+      setStatus(`${name} をダウンロードしました（${list[0].length}ページ）。`, 'ok');
     } catch (e) {
       setStatus('保存に失敗しました: ' + (e.message || e), 'err');
     } finally {
-      $('save').disabled = !pages.filter(p => !p.del).length;
+      updateOut();
     }
+  }
+
+  // 分割保存：フォルダを1回選んで、その中に連番で書き出す
+  async function saveMany(list) {
+    if (!window.showDirectoryPicker) {
+      setStatus('このブラウザはフォルダ保存に対応していないため、分割保存は使えません。'
+        + '「指定位置で分割」の代わりに「選択ページだけを1ファイル」で1本ずつ保存してください。', 'err');
+      return;
+    }
+    let dir;
+    try {
+      dir = await showDirectoryPicker({ mode: 'readwrite' });
+    } catch (e) {
+      if (e.name === 'AbortError') { setStatus('保存をキャンセルしました。'); return; }
+      throw e;
+    }
+    const base = outBase();
+    const width = String(list.length).length;
+    for (let i = 0; i < list.length; i++) {
+      setStatus(`書き出し中… ${i + 1} / ${list.length}`);
+      const bytes = await buildFrom(list[i]);
+      const fname = `${base}_${String(i + 1).padStart(Math.max(2, width), '0')}.pdf`;
+      const fh = await dir.getFileHandle(fname, { create: true });
+      const w = await fh.createWritable();
+      await w.write(new Blob([bytes], { type: 'application/pdf' }));
+      await w.close();
+    }
+    setStatus(`${list.length}ファイルを ${base}_… の名前で保存しました。`, 'ok');
   }
 
   /* ---------- 入力 ---------- */
@@ -547,16 +763,18 @@
 
   $('rangeSel').addEventListener('click', () => {
     const { set, bad, max } = parseRanges($('rangeInput').value);
-    if (!set.size && !bad.length) { setStatus('ページ番号を入力してください。', 'err'); return; }
+    if (!set.size && !bad.length) { setNote('ページ番号を入力してください。', 'err'); return; }
     sel = set;
-    cursor = set.size ? Math.min(...set) : null;
     anchor = null;
+    cursor = pages.find(p => sel.has(p)) || null;
     render();
-    if (cursor !== null) jumpTo(cursor);
-    setNote(bad.length ? `解釈できない指定: ${bad.join(', ')}（1〜${max}の範囲で指定してください）` : `${set.size}ページを選択しました。`, bad.length ? 'err' : '');
+    if (cursor) jumpTo(cursor);
+    setNote(bad.length
+      ? `解釈できない指定: ${bad.join(', ')}（1〜${max}の範囲で指定してください）`
+      : `${set.size}ページを選択しました。`, bad.length ? 'err' : '');
   });
   $('rangeInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('rangeSel').click(); });
-  $('selAll').addEventListener('click', () => { sel = new Set(pages.map((_, i) => i)); anchor = null; setNote(''); render(); });
+  $('selAll').addEventListener('click', () => { sel = new Set(pages); anchor = null; setNote(''); render(); });
   $('selNone').addEventListener('click', () => { sel.clear(); anchor = null; setNote(''); render(); });
 
   $('opDel').addEventListener('click', () => apply(p => { p.del = true; }, '削除'));
@@ -565,12 +783,14 @@
   $('rot180').addEventListener('click', () => apply(p => { p.rot = (p.rot + 180) % 360; }, '180°回転', true));
   $('rot270').addEventListener('click', () => apply(p => { p.rot = (p.rot + 270) % 360; }, '270°回転', true));
   $('rot0').addEventListener('click', () => apply(p => { p.rot = 0; }, '回転リセット', true));
+  $('moveUp').addEventListener('click', () => nudge(-1));
+  $('moveDown').addEventListener('click', () => nudge(1));
   $('resetAll').addEventListener('click', () => {
+    pages.sort((a, b) => a.src - b.src);
     pages.forEach(p => { p.del = false; p.rot = 0; });
     sel.clear(); anchor = null;
-    outDirty = true; render();
-    if (mode === 'out') refreshOut();
-    setNote('変更をすべて取り消しました。');
+    afterEdit();
+    setNote('削除・回転・並べ替えをすべて取り消しました。');
   });
 
   $('modeSrc').addEventListener('click', () => setMode('src'));
@@ -580,10 +800,12 @@
     const url = mode === 'src' ? srcUrl : outUrl;
     if (url) window.open(url, '_blank');
   });
+  $('outMode').addEventListener('change', updateOut);
+  $('splitArg').addEventListener('input', updateOut);
   $('save').addEventListener('click', save);
 
   document.addEventListener('keydown', e => {
-    if (/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) return;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) return;
     if ((e.key === 'Delete' || e.key === 'Backspace') && sel.size) { e.preventDefault(); $('opDel').click(); }
   });
 })();
