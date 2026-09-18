@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ページ編集</title>
+<style>
+  :root{
+    --bg:#E6E9EC;       /* 作業机のグレー */
+    --sheet:#FFFFFF;    /* 紙 */
+    --ink:#1E2830;      /* 本文 */
+    --muted:#66727C;    /* 裏足 */
+    --line:#C9CFD5;     /* 罫 */
+    --accent:#2457C5;   /* 操作色 */
+    --warn:#B3261E;     /* エラー */
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg);color:var(--ink);
+    font-family:"BIZ UDPGothic","Yu Gothic UI","Meiryo",system-ui,sans-serif;
+    font-size:15px;line-height:1.55;
+  }
+  .wrap{max-width:1180px;margin:0 auto;padding:28px 20px 40px}
+  header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:12px}
+  h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.02em}
+  h2{font-size:14px;margin:0;font-weight:700}
+  .count{color:var(--muted);font-size:13px}
+
+  /* 共通タブ */
+  .tabs{display:flex;gap:2px;margin:0 0 22px;border-bottom:1px solid var(--line)}
+  .tabs a{
+    font-size:13px;text-decoration:none;color:var(--muted);padding:7px 14px;
+    border:1px solid transparent;border-bottom:none;border-radius:4px 4px 0 0;
+    position:relative;top:1px;
+  }
+  .tabs a:hover{color:var(--ink);background:#EDF0F3}
+  .tabs a.is-current{
+    background:var(--sheet);border-color:var(--line);border-bottom-color:var(--sheet);
+    color:var(--ink);font-weight:700;
+  }
+
+  /* ドロップ面：紙の束 */
+  .drop{
+    position:relative;background:var(--sheet);border:1.5px dashed var(--line);
+    border-radius:6px;padding:26px 20px;text-align:center;cursor:pointer;
+    transition:border-color .15s, background .15s;
+  }
+  .drop::before,.drop::after{
+    content:"";position:absolute;inset:0;border-radius:6px;background:var(--sheet);
+    border:1px solid var(--line);z-index:-1;
+  }
+  .drop::before{transform:translate(5px,5px)}
+  .drop::after{transform:translate(10px,10px);opacity:.6}
+  .drop:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+  body.dragging .drop{border-color:var(--accent);background:#F1F5FD}
+  .drop strong{font-size:17px;display:block}
+  .drop span{color:var(--muted);font-size:13px}
+  .drop-wrap{position:relative;z-index:0;margin-bottom:28px}
+
+  .filebar{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+  .fname{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  .cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+  .panel{background:var(--sheet);border:1px solid var(--line);border-radius:6px;padding:14px}
+  .panel-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+  .hint{color:var(--muted);font-size:12px}
+
+  .rangebar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .rangebar input{
+    font:inherit;font-size:13px;flex:1;min-width:150px;padding:5px 8px;
+    border:1px solid var(--line);border-radius:4px;background:var(--sheet);color:var(--ink);
+  }
+
+  /* ページチップ */
+  .chips{
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(46px,1fr));gap:4px;
+    max-height:330px;overflow:auto;padding:8px;border:1px solid var(--line);
+    border-radius:4px;background:#FAFBFC;
+  }
+  .chip{
+    position:relative;font:inherit;font-size:12px;font-variant-numeric:tabular-nums;
+    padding:7px 2px 12px;border:1px solid var(--line);border-radius:3px;background:var(--sheet);
+    color:var(--ink);cursor:pointer;text-align:center;user-select:none;line-height:1.2;
+  }
+  .chip:hover{border-color:var(--ink)}
+  .chip.sel{background:#E8EFFC;border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+  .chip.del{color:var(--warn);text-decoration:line-through;background:#FBEEEC;border-color:#E0B4AF}
+  .chip.del.sel{box-shadow:inset 0 0 0 1px var(--accent)}
+  /* 1クリック目の「起点」＝太枠。2クリック目で選択に変わり太枠は外れる */
+  .chip.anchor{border-color:var(--ink);box-shadow:inset 0 0 0 2px var(--ink)}
+  .chip .rot{
+    position:absolute;left:0;right:0;bottom:1px;font-size:9px;color:var(--accent);font-weight:700;
+  }
+
+  .acts{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:10px}
+  .acts .sep{width:1px;height:20px;background:var(--line)}
+  .summary{margin-top:6px;font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .summary b{color:var(--ink)}
+  .pnote{margin-top:10px;min-height:1.4em;font-size:13px;color:var(--muted)}
+  .pnote.err{color:var(--warn);font-weight:700}
+  .pnote.ok{color:#1F6E3A}
+
+  .viewer iframe{width:100%;height:420px;border:1px solid var(--line);border-radius:4px;background:#F2F3F5}
+  .vmode{display:flex;gap:4px}
+  .vmode button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .vnote{margin-top:8px;font-size:12px;color:var(--muted);min-height:2.6em}
+  .ver{font-size:11px;font-weight:400;color:var(--muted);margin-left:8px;letter-spacing:0}
+
+  button{
+    font:inherit;font-size:13px;color:var(--ink);background:var(--sheet);
+    border:1px solid var(--line);border-radius:4px;padding:5px 10px;cursor:pointer;
+  }
+  button:hover:not(:disabled){border-color:var(--ink)}
+  button:focus-visible,input:focus-visible{outline:3px solid var(--accent);outline-offset:1px}
+  button:disabled{opacity:.4;cursor:default}
+  button.danger{color:var(--warn)}
+  button.danger:hover:not(:disabled){border-color:var(--warn)}
+
+  .out{margin-top:22px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .out label{font-size:13px;color:var(--muted)}
+  .out input{
+    font:inherit;flex:1;min-width:220px;padding:8px 10px;border:1px solid var(--line);
+    border-radius:4px;background:var(--sheet);color:var(--ink);
+  }
+  button.primary{
+    background:var(--accent);border-color:var(--accent);color:#fff;font-size:15px;
+    padding:9px 22px;font-weight:700;
+  }
+  button.primary:hover:not(:disabled){background:#1C47A6;border-color:#1C47A6}
+  .status{margin-top:12px;min-height:1.5em;font-size:13px;color:var(--muted)}
+  .status.err{color:var(--warn)}
+  .status.ok{color:#1F6E3A}
+
+  @media (max-width:860px){
+    .cols{grid-template-columns:1fr}
+    .viewer iframe{height:320px}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>ページ編集<span class="ver">rev.4</span></h1>
+    <div class="count" id="count"></div>
+  </header>
+
+  <nav class="tabs">
+    <a href="index.html">ホーム</a>
+    <a href="pdf-merge.html">PDF結合</a>
+    <a href="pdf-edit.html" class="is-current" aria-current="page">ページ編集</a>
+    <a href="zip2pdf.html">zip→PDF変換</a>
+  </nav>
+
+  <div class="drop-wrap" id="dropWrap">
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="PDFを読み込む">
+      <strong>PDFをここにドロップ</strong>
+      <span>またはクリックして選択（1ファイル）。ページの削除と90°単位の回転ができます。</span>
+    </div>
+    <input type="file" id="picker" accept="application/pdf,.pdf" hidden>
+  </div>
+
+  <div id="editor" hidden>
+    <div class="filebar">
+      <div class="fname" id="fname"></div>
+      <button id="reload">別のPDFを読み込む</button>
+    </div>
+
+    <div class="cols">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>ページ</h2>
+          <div class="hint">1回目＝起点／同じページをもう一度＝単独選択／別ページ＝範囲選択<br>番号はプレビューの表示内容に合わせて振り直されます</div>
+        </div>
+        <div class="rangebar">
+          <input id="rangeInput" type="text" placeholder="例: 2, 5-8, 12" spellcheck="false">
+          <button id="rangeSel">番号で選択</button>
+          <button id="selAll">全選択</button>
+          <button id="selNone">選択解除</button>
+        </div>
+        <div class="chips" id="chips"></div>
+        <div class="acts">
+          <button id="opDel" class="danger">削除</button>
+          <button id="opUndel">削除を取消</button>
+          <span class="sep"></span>
+          <button id="rot90">⟳ 90°</button>
+          <button id="rot180">⟳ 180°</button>
+          <button id="rot270">⟳ 270°</button>
+          <button id="rot0">回転を戻す</button>
+          <span class="sep"></span>
+          <button id="resetAll">全変更を取消</button>
+        </div>
+        <div class="summary" id="summary"></div>
+        <div class="pnote" id="pnote" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="panel viewer">
+        <div class="panel-head">
+          <h2>プレビュー</h2>
+          <div class="vmode">
+            <button id="modeSrc">元のPDF</button>
+            <button id="modeOut" class="on">編集結果</button>
+            <button id="openTab">別タブで開く</button>
+          </div>
+        </div>
+        <iframe id="view" title="PDFプレビュー"></iframe>
+        <div class="vnote" id="vnote"></div>
+      </section>
+    </div>
+
+    <div class="out">
+      <label for="outName">保存名</label>
+      <input id="outName" type="text" spellcheck="false">
+      <button class="primary" id="save">保存</button>
+    </div>
+  </div>
+
+  <div class="status" id="status" role="status" aria-live="polite"></div>
+</div>
+
+<script src="lib/pdf-lib.min.js"></script>
+<script>
+(() => {
+  const { PDFDocument, degrees } = PDFLib;
+  const $ = id => document.getElementById(id);
+  const statusEl = $('status');
+
+  let srcBytes = null;      // Uint8Array（元PDF、変更しない）
+  let srcName  = '';
+  let pages    = [];        // {origRot, rot, del}
+  let sel      = new Set(); // 0-based の選択
+  let anchor   = null;      // 1クリック目の起点
+  let cursor   = null;      // 最後にクリックしたページ
+  let srcUrl   = null;      // 元PDFの blob URL
+  let outUrl   = null;      // 編集結果の blob URL
+  let mode     = 'out';   // 既定は編集結果
+  let outDirty = true;      // 編集結果の作り直しが必要か
+
+  const setStatus = (msg, kind = '') => {
+    statusEl.textContent = msg;
+    statusEl.className = 'status' + (kind ? ' ' + kind : '');
+  };
+  // 操作ボタンのすぐ下に出す、操作パネル用のメッセージ
+  const setNote = (msg, kind = '') => {
+    const el = $('pnote');
+    el.textContent = msg;
+    el.className = 'pnote' + (kind ? ' ' + kind : '');
+  };
+
+  /* ---------- ページ番号 ----------
+     内部では常に「元PDFの 0-based index」で持つ。
+     画面に出す番号だけを、いまプレビューしている側の番号に合わせる。
+     - 元のPDF   : 1..元のページ数
+     - 編集結果  : 1..残るページ数（削除したページは番号なし＝「−」） */
+  function outNumbers() {
+    const a = new Array(pages.length).fill(null);
+    let n = 0;
+    pages.forEach((p, i) => { if (!p.del) a[i] = ++n; });
+    return a;
+  }
+
+  // 表示番号 → 元PDFの index
+  function numberMap() {
+    const m = new Map();
+    if (mode === 'src') pages.forEach((_, i) => m.set(i + 1, i));
+    else outNumbers().forEach((v, i) => { if (v != null) m.set(v, i); });
+    return m;
+  }
+
+  /* 「2, 5-8, 12」を、いま表示中の番号として解釈して index 集合にする */
+  function parseRanges(text) {
+    const map = numberMap();
+    const max = map.size;
+    const out = new Set();
+    const bad = [];
+    for (const raw of text.split(/[,、\s]+/)) {
+      if (!raw) continue;
+      const m = raw.match(/^(\d+)(?:\s*[-–~ー]\s*(\d+))?$/);
+      if (!m) { bad.push(raw); continue; }
+      let a = +m[1], b = m[2] ? +m[2] : a;
+      if (a > b) [a, b] = [b, a];
+      if (a < 1 || b > max) { bad.push(raw); continue; }
+      for (let k = a; k <= b; k++) { const i = map.get(k); if (i != null) out.add(i); }
+    }
+    return { set: out, bad, max };
+  }
+
+  /* ---------- 読み込み ---------- */
+  async function loadFile(file) {
+    if (!file) return;
+    if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') {
+      setStatus('PDFファイルではありません。', 'err'); return;
+    }
+    setStatus('読み込み中…');
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+      if (doc.isEncrypted) { setStatus('パスワード保護のため編集できません。', 'err'); return; }
+      const n = doc.getPageCount();
+      if (!n) { setStatus('ページがありません。', 'err'); return; }
+
+      srcBytes = bytes;
+      srcName  = file.name;
+      pages = doc.getPages().map(p => ({ origRot: ((p.getRotation().angle % 360) + 360) % 360, rot: 0, del: false }));
+      sel.clear(); anchor = null; cursor = null;
+
+      revoke();
+      srcUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+      outDirty = true; mode = 'out';
+      $('outName').value = srcName.replace(/\.pdf$/i, '') + '_edited.pdf';
+
+      $('fname').textContent = srcName;
+      $('editor').hidden = false;
+      $('dropWrap').hidden = true;
+      render();
+      setMode('out');
+      setNote('');
+      setStatus(`${srcName} を読み込みました（${n}ページ）。`, 'ok');
+    } catch (e) {
+      setStatus('PDFとして読み込めません: ' + (e.message || e), 'err');
+    }
+  }
+
+  function revoke() {
+    if (outUrl && outUrl !== srcUrl) URL.revokeObjectURL(outUrl);
+    outUrl = null;
+    if (srcUrl) { URL.revokeObjectURL(srcUrl); srcUrl = null; }
+  }
+
+  /* ---------- 表示 ---------- */
+  function render() {
+    const chips = $('chips');
+    const no = outNumbers();
+    chips.innerHTML = '';
+    pages.forEach((p, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chip' + (sel.has(i) ? ' sel' : '') + (p.del ? ' del' : '')
+                  + (anchor === i ? ' anchor' : '');
+      b.textContent = mode === 'src' ? String(i + 1) : (no[i] == null ? '−' : String(no[i]));
+      b.setAttribute('aria-pressed', sel.has(i) ? 'true' : 'false');
+      b.title = `元のPDF ${i + 1}ページ`
+        + (p.del ? ' / 削除' : ` / 編集結果 ${no[i]}ページ目`)
+        + (p.rot ? ` / ${p.rot}°回転` : '');
+      if (p.rot) {
+        const r = document.createElement('span');
+        r.className = 'rot'; r.textContent = p.rot + '°';
+        b.appendChild(r);
+      }
+      // 1回目＝起点 / 同じページをもう一度＝単独選択 / 別ページ＝範囲選択 / 選択済み＝解除
+      b.addEventListener('click', () => {
+        if (sel.has(i)) {
+          sel.delete(i); anchor = null;
+        } else if (anchor === null) {
+          anchor = i;
+        } else if (anchor === i) {
+          sel.add(i); anchor = null;
+        } else {
+          const [a, z] = anchor < i ? [anchor, i] : [i, anchor];
+          for (let k = a; k <= z; k++) sel.add(k);
+          anchor = null;
+        }
+        cursor = i;
+        setNote('');
+        render();
+        jumpTo(i);
+      });
+      chips.appendChild(b);
+    });
+
+    const del = pages.filter(p => p.del).length;
+    const rot = pages.filter(p => !p.del && p.rot).length;
+    const keep = pages.length - del;
+    $('count').textContent = pages.length ? `${pages.length}ページ → ${keep}ページ` : '';
+    $('summary').innerHTML =
+      `選択 <b>${sel.size}</b> ページ ／ 削除 <b>${del}</b> ページ ／ 回転 <b>${rot}</b> ページ ／ 出力 <b>${keep}</b> ページ`;
+    $('save').disabled = !keep;
+    $('modeOut').disabled = !keep;
+  }
+
+  /* 操作の適用。
+     skipDeleted=true の操作（回転）は削除済みページを対象から外す。
+     対象が0件ならその場で理由を出し、状態は変えない。 */
+  function apply(fn, label, skipDeleted = false) {
+    if (!sel.size) {
+      setNote('ページが選択されていません。ページ番号をクリックして選んでください。', 'err');
+      return;
+    }
+    const targets = [...sel].filter(i => !(skipDeleted && pages[i].del));
+    if (!targets.length) {
+      setNote('選択されているのは削除済みのページだけです。先に「削除を取消」するか、別のページを選んでください。', 'err');
+      return;
+    }
+    targets.forEach(i => fn(pages[i]));
+    const skipped = sel.size - targets.length;
+    // 操作後は選択を解除する（直前の選択が次の操作に紛れ込むのを防ぐ）
+    sel.clear(); anchor = null;
+    outDirty = true;
+    render();
+    setNote(`${targets.length}ページを${label}しました。`
+      + (skipped ? `（削除済みの${skipped}ページは対象外）` : ''), 'ok');
+    if (mode === 'out') refreshOut();
+  }
+
+  /* ---------- プレビュー ---------- */
+  // navpanes=0 で Chrome 内蔵ビューアのサムネイル列を閉じる
+  function showPage(n) {
+    const url = mode === 'src' ? srcUrl : outUrl;
+    if (!url) return;
+    $('view').src = `${url}#page=${n}&navpanes=0&view=FitH`;
+  }
+
+  const setVNote = msg => { $('vnote').textContent = msg; };
+
+  function jumpTo(i) {
+    if (i == null) { showPage(1); setVNote(baseVNote()); return; }
+    if (mode === 'src') {
+      showPage(i + 1);
+      setVNote(`${i + 1} ページ目を表示しています。` + baseVNote());
+      return;
+    }
+    const no = outNumbers();
+    if (no[i] != null) {
+      showPage(no[i]);
+      setVNote(`${no[i]} ページ目を表示しています。` + baseVNote());
+      return;
+    }
+    let n = 0;
+    for (let k = 0; k <= i; k++) if (!pages[k].del) n++;
+    n = Math.max(1, n);
+    showPage(n);
+    setVNote(`このページは削除するので編集結果にはありません（元のPDFでは ${i + 1} ページ目）。`
+      + `手前の ${n} ページ目を表示しています。`);
+  }
+
+  function baseVNote() {
+    return mode === 'src'
+      ? '編集前の元PDFです。左のページ番号も元PDFの番号です。'
+      : '削除・回転を適用した結果です。左のページ番号は編集結果の番号と一致します（削除するページは − ）。';
+  }
+
+  function setMode(m) {
+    mode = m;
+    $('modeSrc').classList.toggle('on', m === 'src');
+    $('modeOut').classList.toggle('on', m === 'out');
+    render();   // 表示する側に合わせて番号を振り直す
+    if (m === 'out') refreshOut(); else jumpTo(cursor);
+  }
+
+  async function build() {
+    const keep = pages.map((p, i) => ({ p, i })).filter(x => !x.p.del);
+    if (!keep.length) throw new Error('残るページがありません');
+    const src = await PDFDocument.load(srcBytes, { ignoreEncryption: true });
+    const out = await PDFDocument.create();
+    const copied = await out.copyPages(src, keep.map(x => x.i));
+    copied.forEach((pg, k) => {
+      const st = keep[k].p;
+      if (st.rot) pg.setRotation(degrees((st.origRot + st.rot) % 360));
+      out.addPage(pg);
+    });
+    return await out.save();
+  }
+
+  const hasEdits = () => pages.some(p => p.del || p.rot);
+
+  async function refreshOut() {
+    if (!hasEdits()) {   // 変更がないうちは元PDFをそのまま見せる（毎回組み直さない）
+      if (outUrl && outUrl !== srcUrl) URL.revokeObjectURL(outUrl);
+      outUrl = srcUrl; outDirty = false;
+      jumpTo(cursor); return;
+    }
+    if (!outDirty && outUrl && outUrl !== srcUrl) { jumpTo(cursor); return; }
+    setStatus('プレビューを作成中…');
+    try {
+      const bytes = await build();
+      if (outUrl && outUrl !== srcUrl) URL.revokeObjectURL(outUrl);
+      outUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+      outDirty = false;
+      jumpTo(cursor);
+      setStatus('');
+    } catch (e) {
+      setStatus('プレビューに失敗しました: ' + (e.message || e), 'err');
+    }
+  }
+
+  /* ---------- 保存 ---------- */
+  async function save() {
+    let name = $('outName').value.trim() || 'edited.pdf';
+    if (!/\.pdf$/i.test(name)) name += '.pdf';
+    $('save').disabled = true;
+    try {
+      // ブラウザは「クリック直後」でないとファイル選択ダイアログを開けないため、保存先を先に決める
+      let handle = null;
+      if (window.showSaveFilePicker) {
+        try {
+          handle = await showSaveFilePicker({
+            suggestedName: name,
+            types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
+          });
+        } catch (e) {
+          if (e.name === 'AbortError') { setStatus('保存をキャンセルしました。'); return; }
+          handle = null;
+        }
+      }
+      setStatus('書き出し中…');
+      const bytes = await build();
+      const blob = new Blob([bytes], { type: 'application/pdf' });
+      const keep = pages.filter(p => !p.del).length;
+
+      if (handle) {
+        const w = await handle.createWritable();
+        await w.write(blob); await w.close();
+        setStatus(`${handle.name} を保存しました（${keep}ページ）。`, 'ok');
+        return;
+      }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      setStatus(`${name} をダウンロードしました（${keep}ページ）。`, 'ok');
+    } catch (e) {
+      setStatus('保存に失敗しました: ' + (e.message || e), 'err');
+    } finally {
+      $('save').disabled = !pages.filter(p => !p.del).length;
+    }
+  }
+
+  /* ---------- 入力 ---------- */
+  let depth = 0;
+  const isFileDrag = e => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+  window.addEventListener('dragenter', e => { if (isFileDrag(e)) { depth++; document.body.classList.add('dragging'); } });
+  window.addEventListener('dragleave', e => { if (isFileDrag(e) && --depth <= 0) { depth = 0; document.body.classList.remove('dragging'); } });
+  window.addEventListener('dragover', e => { if (isFileDrag(e)) e.preventDefault(); });
+  window.addEventListener('drop', e => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault(); depth = 0; document.body.classList.remove('dragging');
+    const fs = [...e.dataTransfer.files];
+    if (fs.length > 1) setStatus('1ファイルずつ編集します。最初のPDFを読み込みました。');
+    loadFile(fs[0]);
+  });
+
+  $('drop').addEventListener('click', () => $('picker').click());
+  $('drop').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('picker').click(); } });
+  $('picker').addEventListener('change', e => { loadFile(e.target.files[0]); e.target.value = ''; });
+  $('reload').addEventListener('click', () => { $('picker').click(); });
+
+  $('rangeSel').addEventListener('click', () => {
+    const { set, bad, max } = parseRanges($('rangeInput').value);
+    if (!set.size && !bad.length) { setStatus('ページ番号を入力してください。', 'err'); return; }
+    sel = set;
+    cursor = set.size ? Math.min(...set) : null;
+    anchor = null;
+    render();
+    if (cursor !== null) jumpTo(cursor);
+    setNote(bad.length ? `解釈できない指定: ${bad.join(', ')}（1〜${max}の範囲で指定してください）` : `${set.size}ページを選択しました。`, bad.length ? 'err' : '');
+  });
+  $('rangeInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('rangeSel').click(); });
+  $('selAll').addEventListener('click', () => { sel = new Set(pages.map((_, i) => i)); anchor = null; setNote(''); render(); });
+  $('selNone').addEventListener('click', () => { sel.clear(); anchor = null; setNote(''); render(); });
+
+  $('opDel').addEventListener('click', () => apply(p => { p.del = true; }, '削除'));
+  $('opUndel').addEventListener('click', () => apply(p => { p.del = false; }, '削除取消'));
+  $('rot90').addEventListener('click', () => apply(p => { p.rot = (p.rot + 90) % 360; }, '90°回転', true));
+  $('rot180').addEventListener('click', () => apply(p => { p.rot = (p.rot + 180) % 360; }, '180°回転', true));
+  $('rot270').addEventListener('click', () => apply(p => { p.rot = (p.rot + 270) % 360; }, '270°回転', true));
+  $('rot0').addEventListener('click', () => apply(p => { p.rot = 0; }, '回転リセット', true));
+  $('resetAll').addEventListener('click', () => {
+    pages.forEach(p => { p.del = false; p.rot = 0; });
+    sel.clear(); anchor = null;
+    outDirty = true; render();
+    if (mode === 'out') refreshOut();
+    setNote('変更をすべて取り消しました。');
+  });
+
+  $('modeSrc').addEventListener('click', () => setMode('src'));
+  $('modeOut').addEventListener('click', () => setMode('out'));
+  $('openTab').addEventListener('click', async () => {
+    if (mode === 'out' && outDirty) await refreshOut();
+    const url = mode === 'src' ? srcUrl : outUrl;
+    if (url) window.open(url, '_blank');
+  });
+  $('save').addEventListener('click', save);
+
+  document.addEventListener('keydown', e => {
+    if (/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) return;
+    if ((e.key === 'Delete' || e.key === 'Backspace') && sel.size) { e.preventDefault(); $('opDel').click(); }
+  });
+})();
+</script>
+</body>
+</html>

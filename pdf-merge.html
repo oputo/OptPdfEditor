@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF結合</title>
+<style>
+  :root{
+    --bg:#E6E9EC;      /* 作業台のグレー */
+    --sheet:#FFFFFF;   /* 紙 */
+    --ink:#1E2830;     /* 本文 */
+    --muted:#66727C;   /* 補足 */
+    --line:#C9CFD5;    /* 罫 */
+    --accent:#2457C5;  /* 操作色 */
+    --warn:#B3261E;    /* エラー */
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg);color:var(--ink);
+    font-family:"BIZ UDPGothic","Yu Gothic UI","Meiryo",system-ui,sans-serif;
+    font-size:15px;line-height:1.55;
+  }
+  .wrap{max-width:860px;margin:0 auto;padding:28px 20px 40px}
+  header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:18px}
+  h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.02em}
+  .count{color:var(--muted);font-size:13px}
+  /* 共通タブ */
+  .tabs{display:flex;gap:2px;margin:0 0 22px;border-bottom:1px solid var(--line)}
+  .tabs a{
+    font-size:13px;text-decoration:none;color:var(--muted);padding:7px 14px;
+    border:1px solid transparent;border-bottom:none;border-radius:4px 4px 0 0;
+    position:relative;top:1px;
+  }
+  .tabs a:hover{color:var(--ink);background:#EDF0F3}
+  .tabs a.is-current{
+    background:var(--sheet);border-color:var(--line);border-bottom-color:var(--sheet);
+    color:var(--ink);font-weight:700;
+  }
+
+  /* ドロップ面：紙の束 */
+  .drop{
+    position:relative;background:var(--sheet);border:1.5px dashed var(--line);
+    border-radius:6px;padding:26px 20px;text-align:center;cursor:pointer;
+    transition:border-color .15s, background .15s;
+  }
+  .drop::before,.drop::after{
+    content:"";position:absolute;inset:0;border-radius:6px;background:var(--sheet);
+    border:1px solid var(--line);z-index:-1;
+  }
+  .drop::before{transform:translate(5px,5px)}
+  .drop::after{transform:translate(10px,10px);opacity:.6}
+  .drop:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+  body.dragging .drop{border-color:var(--accent);background:#F1F5FD}
+  .drop strong{font-size:17px;display:block}
+  .drop span{color:var(--muted);font-size:13px}
+  .drop-wrap{position:relative;z-index:0;margin-bottom:28px}
+
+  /* 一覧 */
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+  ol.list{list-style:none;margin:0;padding:0;background:var(--sheet);border:1px solid var(--line);border-radius:6px}
+  .empty{padding:22px;text-align:center;color:var(--muted)}
+  li.item{
+    display:grid;grid-template-columns:34px 1fr auto auto;align-items:center;gap:10px;
+    padding:9px 10px 9px 6px;border-top:1px solid var(--line);background:var(--sheet);
+  }
+  li.item:first-child{border-top:none}
+  li.item.over-top{box-shadow:inset 0 3px 0 var(--accent)}
+  li.item.over-bottom{box-shadow:inset 0 -3px 0 var(--accent)}
+  li.item.moving{opacity:.4}
+  .no{
+    text-align:right;color:var(--muted);font-variant-numeric:tabular-nums;cursor:grab;
+    user-select:none;padding-right:4px;
+  }
+  .no:active{cursor:grabbing}
+  .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .meta{color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .meta.err{color:var(--warn)}
+  .ops{display:flex;gap:4px}
+
+  button{
+    font:inherit;font-size:13px;color:var(--ink);background:var(--sheet);
+    border:1px solid var(--line);border-radius:4px;padding:5px 10px;cursor:pointer;
+  }
+  button:hover:not(:disabled){border-color:var(--ink)}
+  button:focus-visible,input:focus-visible{outline:3px solid var(--accent);outline-offset:1px}
+  button:disabled{opacity:.4;cursor:default}
+  .ops button{padding:3px 8px;min-width:30px}
+
+  /* 出力 */
+  .out{margin-top:22px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .out label{font-size:13px;color:var(--muted)}
+  .out input{
+    font:inherit;flex:1;min-width:220px;padding:8px 10px;border:1px solid var(--line);
+    border-radius:4px;background:var(--sheet);color:var(--ink);
+  }
+  button.primary{
+    background:var(--accent);border-color:var(--accent);color:#fff;font-size:15px;
+    padding:9px 22px;font-weight:700;
+  }
+  button.primary:hover:not(:disabled){background:#1C47A6;border-color:#1C47A6}
+  .status{margin-top:12px;min-height:1.5em;font-size:13px;color:var(--muted)}
+  .status.err{color:var(--warn)}
+  .status.ok{color:#1F6E3A}
+
+  @media (max-width:560px){
+    li.item{grid-template-columns:28px 1fr auto;}
+    .meta{grid-column:2;grid-row:2}
+    .ops{grid-column:3;grid-row:1 / span 2}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>PDF結合</h1>
+    <div class="count" id="count"></div>
+  </header>
+
+  <nav class="tabs">
+    <a href="index.html">ホーム</a>
+    <a href="pdf-merge.html" class="is-current" aria-current="page">PDF結合</a>
+    <a href="pdf-edit.html">ページ編集</a>
+    <a href="zip2pdf.html">zip→PDF変換</a>
+  </nav>
+
+  <div class="drop-wrap">
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="PDFを追加">
+      <strong>PDFをここにドロップ</strong>
+      <span>またはクリックして選択（複数可）。ファイル名順に並びます。</span>
+    </div>
+    <input type="file" id="picker" accept="application/pdf,.pdf" multiple hidden>
+  </div>
+
+  <div class="toolbar">
+    <button id="sortName">ファイル名順に並べ直す</button>
+    <button id="clearAll">すべて外す</button>
+  </div>
+
+  <ol class="list" id="list"></ol>
+
+  <div class="out">
+    <label for="outName">保存名</label>
+    <input id="outName" type="text" spellcheck="false">
+    <button class="primary" id="merge">結合して保存</button>
+  </div>
+  <div class="status" id="status" role="status" aria-live="polite"></div>
+</div>
+
+<script src="lib/pdf-lib.min.js"></script>
+<script>
+(() => {
+  const { PDFDocument } = PDFLib;
+  const $ = id => document.getElementById(id);
+  const list = $('list'), statusEl = $('status');
+  let items = [];              // {id, name, size, bytes, pages, error}
+  let seq = 0;
+  let outNameTouched = false;
+
+  const collator = new Intl.Collator('ja', { numeric: true, sensitivity: 'base' });
+  const byName = (a, b) => collator.compare(a.name, b.name);
+  const fmtSize = n => n < 1024*1024 ? (n/1024).toFixed(0) + ' KB' : (n/1024/1024).toFixed(2) + ' MB';
+
+  function setStatus(msg, kind = '') {
+    statusEl.textContent = msg;
+    statusEl.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  // 共通の接頭辞から保存名を提案（例: 20260915_016.pdf... → 20260915_merged.pdf）
+  function suggestName() {
+    if (outNameTouched) return;
+    const names = items.map(i => i.name.replace(/\.pdf$/i, ''));
+    let base = 'merged';
+    if (names.length) {
+      let p = names[0];
+      for (const n of names) { while (!n.startsWith(p)) p = p.slice(0, -1); }
+      p = p.replace(/[\d]+$/, m => (names.length > 1 ? '' : m)).replace(/[_\-\s.]+$/, '');
+      base = p ? p + '_merged' : 'merged';
+    }
+    $('outName').value = base + '.pdf';
+  }
+
+  async function addFiles(fileList) {
+    const files = [...fileList].filter(f => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
+    const skipped = fileList.length - files.length;
+    if (!files.length) { setStatus('PDFファイルが含まれていません。', 'err'); return; }
+    setStatus('読み込み中…');
+    let dup = 0;
+    const added = [];
+    for (const f of files) {
+      if (items.some(i => i.name === f.name && i.size === f.size)) { dup++; continue; }
+      const it = { id: ++seq, name: f.name, size: f.size, bytes: null, pages: null, error: null };
+      try {
+        it.bytes = new Uint8Array(await f.arrayBuffer());
+        const doc = await PDFDocument.load(it.bytes, { ignoreEncryption: true });
+        if (doc.isEncrypted) it.error = 'パスワード保護のため結合できません';
+        it.pages = doc.getPageCount();
+      } catch (e) {
+        it.error = 'PDFとして読み込めません';
+      }
+      added.push(it);
+    }
+    items = items.concat(added.sort(byName));
+    // 初回投入時は全体をファイル名順に
+    if (items.length === added.length) items.sort(byName);
+    render(); suggestName();
+    const notes = [];
+    if (added.length) notes.push(`${added.length}件を追加しました。`);
+    if (dup) notes.push(`同じファイル${dup}件は追加していません。`);
+    if (skipped) notes.push(`PDF以外の${skipped}件は無視しました。`);
+    setStatus(notes.join(' '));
+  }
+
+  function move(from, to) {
+    if (to < 0 || to >= items.length || from === to) return;
+    const [it] = items.splice(from, 1);
+    items.splice(to, 0, it);
+    render();
+  }
+
+  function render() {
+    list.innerHTML = '';
+    if (!items.length) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = 'まだPDFがありません。上の枠にドロップしてください。';
+      list.appendChild(li);
+    }
+    items.forEach((it, idx) => {
+      const li = document.createElement('li');
+      li.className = 'item';
+      li.dataset.idx = idx;
+
+      const no = document.createElement('div');
+      no.className = 'no'; no.textContent = idx + 1; no.title = 'ドラッグで並べ替え';
+      li.draggable = true;
+
+      const name = document.createElement('div');
+      name.className = 'name'; name.textContent = it.name; name.title = it.name;
+
+      const meta = document.createElement('div');
+      if (it.error) { meta.className = 'meta err'; meta.textContent = it.error; }
+      else { meta.className = 'meta'; meta.textContent = `${it.pages}ページ ${fmtSize(it.size)}`; }
+
+      const ops = document.createElement('div');
+      ops.className = 'ops';
+      const mk = (label, aria, fn, dis) => {
+        const b = document.createElement('button');
+        b.textContent = label; b.setAttribute('aria-label', aria); b.disabled = dis;
+        b.addEventListener('click', fn); ops.appendChild(b);
+      };
+      mk('↑', `${it.name} を上へ`, () => move(idx, idx - 1), idx === 0);
+      mk('↓', `${it.name} を下へ`, () => move(idx, idx + 1), idx === items.length - 1);
+      mk('×', `${it.name} を外す`, () => { items.splice(idx, 1); render(); suggestName(); }, false);
+
+      // 行のドラッグ並べ替え
+      li.addEventListener('dragstart', e => {
+        e.dataTransfer.setData('text/x-row', String(idx));
+        e.dataTransfer.effectAllowed = 'move';
+        li.classList.add('moving');
+      });
+      li.addEventListener('dragend', () => li.classList.remove('moving'));
+      li.addEventListener('dragover', e => {
+        if (!e.dataTransfer.types.includes('text/x-row')) return;
+        e.preventDefault();
+        const r = li.getBoundingClientRect();
+        const top = e.clientY < r.top + r.height / 2;
+        li.classList.toggle('over-top', top);
+        li.classList.toggle('over-bottom', !top);
+      });
+      li.addEventListener('dragleave', () => li.classList.remove('over-top', 'over-bottom'));
+      li.addEventListener('drop', e => {
+        if (!e.dataTransfer.types.includes('text/x-row')) return;
+        e.preventDefault(); e.stopPropagation();
+        const from = +e.dataTransfer.getData('text/x-row');
+        const r = li.getBoundingClientRect();
+        let to = e.clientY < r.top + r.height / 2 ? idx : idx + 1;
+        if (from < to) to--;
+        li.classList.remove('over-top', 'over-bottom');
+        move(from, to);
+      });
+
+      li.append(no, name, meta, ops);
+      list.appendChild(li);
+    });
+    const ok = items.filter(i => !i.error);
+    const pages = ok.reduce((s, i) => s + i.pages, 0);
+    $('count').textContent = items.length ? `${items.length}ファイル / ${pages}ページ` : '';
+    $('merge').disabled = !ok.length;
+    $('sortName').disabled = items.length < 2;
+    $('clearAll').disabled = !items.length;
+  }
+
+  async function merge() {
+    const targets = items.filter(i => !i.error);
+    if (!targets.length) return;
+    let outName = $('outName').value.trim() || 'merged.pdf';
+    if (!/\.pdf$/i.test(outName)) outName += '.pdf';
+    $('merge').disabled = true;
+    try {
+      // ブラウザは「クリック直後」でないとファイル選択ダイアログを開けないため、保存先を先に決める
+      let handle = null;
+      if (window.showSaveFilePicker) {
+        try {
+          handle = await showSaveFilePicker({
+            suggestedName: outName,
+            types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
+          });
+        } catch (e) {
+          if (e.name === 'AbortError') { setStatus('保存をキャンセルしました。'); return; }
+          handle = null; // それ以外はダウンロード方式にフォールバック
+        }
+      }
+
+      setStatus('結合中…');
+      const out = await PDFDocument.create();
+      for (const it of targets) {
+        const src = await PDFDocument.load(it.bytes);
+        const pages = await out.copyPages(src, src.getPageIndices());
+        pages.forEach(p => out.addPage(p));
+      }
+      const bytes = await out.save();
+      const blob = new Blob([bytes], { type: 'application/pdf' });
+      const skippedErr = items.length - targets.length;
+      const note = skippedErr ? ` 読み込めなかった${skippedErr}件は含めていません。` : '';
+
+      if (handle) {
+        const w = await handle.createWritable();
+        await w.write(blob); await w.close();
+        setStatus(`${handle.name} を保存しました（${out.getPageCount()}ページ）。` + note, 'ok');
+        return;
+      }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = outName;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      setStatus(`${outName} をダウンロードしました（${out.getPageCount()}ページ）。` + note, 'ok');
+    } catch (e) {
+      setStatus('結合に失敗しました: ' + (e.message || e), 'err');
+    } finally {
+      $('merge').disabled = !items.some(i => !i.error);
+    }
+  }
+
+  // ウィンドウ全体でファイルのドロップを受け付ける
+  let depth = 0;
+  const isFileDrag = e => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+  window.addEventListener('dragenter', e => { if (isFileDrag(e)) { depth++; document.body.classList.add('dragging'); } });
+  window.addEventListener('dragleave', e => { if (isFileDrag(e) && --depth <= 0) { depth = 0; document.body.classList.remove('dragging'); } });
+  window.addEventListener('dragover', e => { if (isFileDrag(e)) e.preventDefault(); });
+  window.addEventListener('drop', e => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault(); depth = 0; document.body.classList.remove('dragging');
+    addFiles(e.dataTransfer.files);
+  });
+
+  $('drop').addEventListener('click', () => $('picker').click());
+  $('drop').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('picker').click(); } });
+  $('picker').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
+  $('sortName').addEventListener('click', () => { items.sort(byName); render(); setStatus('ファイル名順に並べ直しました。'); });
+  $('clearAll').addEventListener('click', () => { items = []; render(); suggestName(); setStatus(''); });
+  $('outName').addEventListener('input', () => { outNameTouched = true; });
+  $('merge').addEventListener('click', merge);
+
+  render(); suggestName();
+})();
+</script>
+</body>
+</html>
