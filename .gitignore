@@ -1,0 +1,7 @@
+# Claude Desktop がファイルを書き出すフォルダ
+Claude outputs/
+
+# OS が作る作業ファイル
+Thumbs.db
+desktop.ini
+.DS_Store

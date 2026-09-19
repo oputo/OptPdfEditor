@@ -74,6 +74,11 @@
   }
   .no:active{cursor:grabbing}
   .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tag{
+    display:inline-block;font-size:11px;line-height:1.5;color:var(--muted);
+    border:1px solid var(--line);border-radius:3px;padding:0 5px;margin-right:6px;
+    vertical-align:1px;
+  }
   .meta{color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}
   .meta.err{color:var(--warn)}
   .ops{display:flex;gap:4px}
@@ -126,11 +131,11 @@
   </nav>
 
   <div class="drop-wrap">
-    <div class="drop" id="drop" tabindex="0" role="button" aria-label="PDFを追加">
-      <strong>PDFをここにドロップ</strong>
-      <span>またはクリックして選択（複数可）。ファイル名順に並びます。</span>
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="PDF・画像・テキストを追加">
+      <strong>PDF・画像・テキストをここにドロップ</strong>
+      <span>pdf / jpg / png / webp / txt / md / csv / log。クリックして選択も可（複数可）。ファイル名順に並びます。</span>
     </div>
-    <input type="file" id="picker" accept="application/pdf,.pdf" multiple hidden>
+    <input type="file" id="picker" accept="application/pdf,.pdf,.jpg,.jpeg,.png,.webp,.txt,.md,.csv,.log" multiple hidden>
   </div>
 
   <div class="toolbar">
@@ -149,18 +154,30 @@
 </div>
 
 <script src="lib/pdf-lib.min.js"></script>
+<script src="lib/fontkit.umd.min.js"></script>
+<script src="lib/opt-topdf.js"></script>
 <script>
 (() => {
   const { PDFDocument } = PDFLib;
+  const { PDF_EXT, IMG_EXT, TXT_EXT, decodeBytes, addImagePage, embedTextFont, addTextPages } = OptToPdf;
   const $ = id => document.getElementById(id);
   const list = $('list'), statusEl = $('status');
-  let items = [];              // {id, name, size, bytes, pages, error}
+  let items = [];              // {id, name, size, kind, bytes, text, chars, w, h, pages, error}
   let seq = 0;
   let outNameTouched = false;
 
   const collator = new Intl.Collator('ja', { numeric: true, sensitivity: 'base' });
   const byName = (a, b) => collator.compare(a.name, b.name);
   const fmtSize = n => n < 1024*1024 ? (n/1024).toFixed(0) + ' KB' : (n/1024/1024).toFixed(2) + ' MB';
+  const TAG = { pdf: 'PDF', image: '画像', text: 'テキスト' };
+
+  // 拡張子から種別を決める。対応しないものは null。
+  function kindOf(file) {
+    if (PDF_EXT.test(file.name) || file.type === 'application/pdf') return 'pdf';
+    if (IMG_EXT.test(file.name)) return 'image';
+    if (TXT_EXT.test(file.name)) return 'text';
+    return null;
+  }
 
   function setStatus(msg, kind = '') {
     statusEl.textContent = msg;
@@ -170,7 +187,7 @@
   // 共通の接頭辞から保存名を提案（例: 20260915_016.pdf... → 20260915_merged.pdf）
   function suggestName() {
     if (outNameTouched) return;
-    const names = items.map(i => i.name.replace(/\.pdf$/i, ''));
+    const names = items.map(i => i.name.replace(/\.[^.]+$/, ''));
     let base = 'merged';
     if (names.length) {
       let p = names[0];
@@ -181,23 +198,44 @@
     $('outName').value = base + '.pdf';
   }
 
+  // 画像の寸法を調べる（同時に、読めない画像をここで弾く）
+  async function probeImage(bytes, name) {
+    const mime = /\.png$/i.test(name) ? 'image/png' : /\.webp$/i.test(name) ? 'image/webp' : 'image/jpeg';
+    const bmp = await createImageBitmap(new Blob([bytes], { type: mime }));
+    const r = { w: bmp.width, h: bmp.height };
+    bmp.close && bmp.close();
+    return r;
+  }
+
   async function addFiles(fileList) {
-    const files = [...fileList].filter(f => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
+    const files = [...fileList].filter(kindOf);
     const skipped = fileList.length - files.length;
-    if (!files.length) { setStatus('PDFファイルが含まれていません。', 'err'); return; }
+    if (!files.length) { setStatus('対応するファイル（pdf / 画像 / テキスト）が含まれていません。', 'err'); return; }
     setStatus('読み込み中…');
     let dup = 0;
     const added = [];
     for (const f of files) {
       if (items.some(i => i.name === f.name && i.size === f.size)) { dup++; continue; }
-      const it = { id: ++seq, name: f.name, size: f.size, bytes: null, pages: null, error: null };
+      const kind = kindOf(f);
+      const it = { id: ++seq, name: f.name, size: f.size, kind, bytes: null, text: null, chars: 0, w: 0, h: 0, pages: null, error: null };
       try {
-        it.bytes = new Uint8Array(await f.arrayBuffer());
-        const doc = await PDFDocument.load(it.bytes, { ignoreEncryption: true });
-        if (doc.isEncrypted) it.error = 'パスワード保護のため結合できません';
-        it.pages = doc.getPageCount();
+        const bytes = new Uint8Array(await f.arrayBuffer());
+        if (kind === 'pdf') {
+          it.bytes = bytes;
+          const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+          if (doc.isEncrypted) it.error = 'パスワード保護のため結合できません';
+          it.pages = doc.getPageCount();
+        } else if (kind === 'image') {
+          it.bytes = bytes;
+          const d = await probeImage(bytes, f.name);
+          it.w = d.w; it.h = d.h; it.pages = 1;
+        } else {
+          it.text = decodeBytes(bytes);          // バイト列は保持しない（テキストだけあればよい）
+          it.chars = [...it.text].length;
+          if (!it.text.trim()) it.error = '中身が空です';
+        }
       } catch (e) {
-        it.error = 'PDFとして読み込めません';
+        it.error = { pdf: 'PDFとして読み込めません', image: '画像として読み込めません', text: 'テキストとして読み込めません' }[kind];
       }
       added.push(it);
     }
@@ -208,7 +246,7 @@
     const notes = [];
     if (added.length) notes.push(`${added.length}件を追加しました。`);
     if (dup) notes.push(`同じファイル${dup}件は追加していません。`);
-    if (skipped) notes.push(`PDF以外の${skipped}件は無視しました。`);
+    if (skipped) notes.push(`対応していない${skipped}件は無視しました。`);
     setStatus(notes.join(' '));
   }
 
@@ -219,12 +257,18 @@
     render();
   }
 
+  function metaText(it) {
+    if (it.kind === 'pdf') return `${it.pages}ページ ${fmtSize(it.size)}`;
+    if (it.kind === 'image') return `${it.w}×${it.h}px ${fmtSize(it.size)}`;
+    return `${it.chars.toLocaleString()}文字 ${fmtSize(it.size)}` + (it.pages ? ` → ${it.pages}ページ` : '');
+  }
+
   function render() {
     list.innerHTML = '';
     if (!items.length) {
       const li = document.createElement('li');
       li.className = 'empty';
-      li.textContent = 'まだPDFがありません。上の枠にドロップしてください。';
+      li.textContent = 'まだファイルがありません。上の枠にドロップしてください。';
       list.appendChild(li);
     }
     items.forEach((it, idx) => {
@@ -237,11 +281,14 @@
       li.draggable = true;
 
       const name = document.createElement('div');
-      name.className = 'name'; name.textContent = it.name; name.title = it.name;
+      name.className = 'name'; name.title = it.name;
+      const tag = document.createElement('span');
+      tag.className = 'tag'; tag.textContent = TAG[it.kind];
+      name.append(tag, document.createTextNode(it.name));
 
       const meta = document.createElement('div');
       if (it.error) { meta.className = 'meta err'; meta.textContent = it.error; }
-      else { meta.className = 'meta'; meta.textContent = `${it.pages}ページ ${fmtSize(it.size)}`; }
+      else { meta.className = 'meta'; meta.textContent = metaText(it); }
 
       const ops = document.createElement('div');
       ops.className = 'ops';
@@ -285,8 +332,11 @@
       list.appendChild(li);
     });
     const ok = items.filter(i => !i.error);
-    const pages = ok.reduce((s, i) => s + i.pages, 0);
-    $('count').textContent = items.length ? `${items.length}ファイル / ${pages}ページ` : '';
+    const pages = ok.reduce((s, i) => s + (i.pages || 0), 0);
+    // テキストのページ数は結合してみるまで確定しないので、その分は「＋」で示す
+    const pending = ok.filter(i => i.kind === 'text' && !i.pages).length;
+    $('count').textContent = items.length
+      ? `${items.length}ファイル / ${pages}${pending ? '＋' : ''}ページ` : '';
     $('merge').disabled = !ok.length;
     $('sortName').disabled = items.length < 2;
     $('clearAll').disabled = !items.length;
@@ -313,29 +363,49 @@
         }
       }
 
-      setStatus('結合中…');
       const out = await PDFDocument.create();
-      for (const it of targets) {
-        const src = await PDFDocument.load(it.bytes);
-        const pages = await out.copyPages(src, src.getPageIndices());
-        pages.forEach(p => out.addPage(p));
+      const texts = targets.filter(i => i.kind === 'text');
+      let font = null;
+      if (texts.length) {
+        setStatus('フォントを準備中…');   // 日本語フォントは初回だけ読み込む
+        font = await embedTextFont(out, texts.map(i => i.text).join(''));
       }
+
+      setStatus('結合中…');
+      const failed = [];
+      for (const it of targets) {
+        try {
+          if (it.kind === 'pdf') {
+            const src = await PDFDocument.load(it.bytes);
+            const pages = await out.copyPages(src, src.getPageIndices());
+            pages.forEach(p => out.addPage(p));
+          } else if (it.kind === 'image') {
+            await addImagePage(out, it.bytes, it.name);
+          } else {
+            it.pages = addTextPages(out, font, it.text);
+          }
+        } catch (e) { failed.push(it.name); }
+      }
+      if (!out.getPageCount()) throw new Error('ページを作れませんでした');
+
       const bytes = await out.save();
       const blob = new Blob([bytes], { type: 'application/pdf' });
       const skippedErr = items.length - targets.length;
-      const note = skippedErr ? ` 読み込めなかった${skippedErr}件は含めていません。` : '';
+      let note = skippedErr ? ` 読み込めなかった${skippedErr}件は含めていません。` : '';
+      if (failed.length) note += ` 変換に失敗した${failed.length}件（${failed.join('、')}）は含めていません。`;
+      render();   // テキストのページ数が確定したので表示を更新
 
       if (handle) {
         const w = await handle.createWritable();
         await w.write(blob); await w.close();
-        setStatus(`${handle.name} を保存しました（${out.getPageCount()}ページ）。` + note, 'ok');
+        setStatus(`${handle.name} を保存しました（${out.getPageCount()}ページ）。` + note, failed.length ? 'err' : 'ok');
         return;
       }
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob); a.download = outName;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-      setStatus(`${outName} をダウンロードしました（${out.getPageCount()}ページ）。` + note, 'ok');
+      setStatus(`${outName} をダウンロードしました（${out.getPageCount()}ページ）。` + note, failed.length ? 'err' : 'ok');
     } catch (e) {
       setStatus('結合に失敗しました: ' + (e.message || e), 'err');
     } finally {
