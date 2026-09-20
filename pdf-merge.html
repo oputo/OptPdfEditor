@@ -159,15 +159,14 @@
 <script>
 (() => {
   const { PDFDocument } = PDFLib;
-  const { PDF_EXT, IMG_EXT, TXT_EXT, decodeBytes, addImagePage, embedTextFont, addTextPages } = OptToPdf;
+  const { PDF_EXT, IMG_EXT, TXT_EXT, compareFileName, decodeBytes, addImagePage, embedTextFont, addTextPages } = OptToPdf;
   const $ = id => document.getElementById(id);
   const list = $('list'), statusEl = $('status');
   let items = [];              // {id, name, size, kind, bytes, text, chars, w, h, pages, error}
   let seq = 0;
   let outNameTouched = false;
 
-  const collator = new Intl.Collator('ja', { numeric: true, sensitivity: 'base' });
-  const byName = (a, b) => collator.compare(a.name, b.name);
+  const byName = (a, b) => compareFileName(a.name, b.name);
   const fmtSize = n => n < 1024*1024 ? (n/1024).toFixed(0) + ' KB' : (n/1024/1024).toFixed(2) + ' MB';
   const TAG = { pdf: 'PDF', image: '画像', text: 'テキスト' };
 
@@ -214,7 +213,13 @@
     setStatus('読み込み中…');
     let dup = 0;
     const added = [];
+    let n = 0;
     for (const f of files) {
+      // 件数が多いときは進捗を出し、ときどき描画を挟む
+      if (files.length > 20 && ++n % 10 === 0) {
+        setStatus(`読み込み中… ${n} / ${files.length}`);
+        await new Promise(r => setTimeout(r));
+      }
       if (items.some(i => i.name === f.name && i.size === f.size)) { dup++; continue; }
       const kind = kindOf(f);
       const it = { id: ++seq, name: f.name, size: f.size, kind, bytes: null, text: null, chars: 0, w: 0, h: 0, pages: null, error: null };
@@ -371,9 +376,14 @@
         font = await embedTextFont(out, texts.map(i => i.text).join(''));
       }
 
-      setStatus('結合中…');
       const failed = [];
+      let done = 0;
       for (const it of targets) {
+        if (done % 5 === 0) {
+          setStatus(`結合中… ${done + 1} / ${targets.length}`);
+          await new Promise(r => setTimeout(r));
+        }
+        done++;
         try {
           if (it.kind === 'pdf') {
             const src = await PDFDocument.load(it.bytes);
@@ -388,6 +398,8 @@
       }
       if (!out.getPageCount()) throw new Error('ページを作れませんでした');
 
+      setStatus('PDFを書き出し中…');
+      await new Promise(r => setTimeout(r));
       const bytes = await out.save();
       const blob = new Blob([bytes], { type: 'application/pdf' });
       const skippedErr = items.length - targets.length;

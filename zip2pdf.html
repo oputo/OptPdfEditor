@@ -134,10 +134,9 @@
 <script>
 (() => {
   const { PDFDocument } = PDFLib;
-  const { IMG_EXT, TXT_EXT, decodeBytes, addImagePage, embedTextFont, addTextPages } = OptToPdf;
+  const { IMG_EXT, TXT_EXT, compareFileName, decodeBytes, addImagePage, embedTextFont, addTextPages } = OptToPdf;
   const $ = id => document.getElementById(id);
 
-  const collator = new Intl.Collator('ja', { numeric: true, sensitivity: 'base' });
   let queue = [];   // {id, file, name, entries, images, texts, skipped[], state, message}
   let seq = 0;
 
@@ -156,7 +155,7 @@
       if (path.startsWith('__MACOSX/') || base.startsWith('.') || /^thumbs\.db$/i.test(base)) return;
       entries.push({ path, entry });
     });
-    entries.sort((a, b) => collator.compare(a.path, b.path));
+    entries.sort((a, b) => compareFileName(a.path, b.path));
     item.entries = entries.filter(e => IMG_EXT.test(e.path) || TXT_EXT.test(e.path));
     item.images = item.entries.filter(e => IMG_EXT.test(e.path)).length;
     item.texts = item.entries.length - item.images;
@@ -279,7 +278,7 @@
     if (!files.length) { setStatus('zipファイルが含まれていません。', 'err'); return; }
     setStatus('zipを確認中…');
     let dup = 0;
-    for (const file of files.sort((a, b) => collator.compare(a.name, b.name))) {
+    for (const file of files.sort((a, b) => compareFileName(a.name, b.name))) {
       if (queue.some(i => i.name === file.name && i.file.size === file.size)) { dup++; continue; }
       const item = { id: ++seq, file, name: file.name, entries: [], images: 0, texts: 0, skipped: [], state: 'ready', message: '' };
       queue.push(item);
