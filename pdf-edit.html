@@ -102,9 +102,28 @@
   .pnote.err{color:var(--warn);font-weight:700}
   .pnote.ok{color:#1F6E3A}
 
-  .viewer iframe{width:100%;height:420px;border:1px solid var(--line);border-radius:4px;background:#F2F3F5}
-  .vmode{display:flex;gap:4px}
+  .viewer .stage{
+    position:relative;width:100%;height:420px;border:1px solid var(--line);border-radius:4px;
+    background:#F2F3F5;overflow:auto;padding:8px;
+  }
+  .viewer .stage canvas{display:block;margin:0 auto;background:#fff;box-shadow:0 1px 5px rgba(0,0,0,.22)}
+  .viewer .stage.busy canvas{opacity:.55}
+  .vmsg{
+    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    color:var(--muted);font-size:13px;text-align:center;padding:16px;
+  }
+  .vmode{display:flex;gap:4px;align-items:center;flex-wrap:wrap}
   .vmode button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .vmode .sep{width:1px;height:20px;background:var(--line);margin:0 4px}
+  .vmode select{
+    font:inherit;font-size:13px;padding:5px 6px;border:1px solid var(--line);
+    border-radius:4px;background:var(--sheet);color:var(--ink);
+  }
+  .vmode .nav{padding:5px 8px;min-width:30px;font-size:12px;line-height:1}
+  .vpage{
+    font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;
+    min-width:58px;text-align:center;user-select:none;
+  }
   .vnote{margin-top:8px;font-size:12px;color:var(--muted);min-height:2.6em}
   .ver{font-size:11px;font-weight:400;color:var(--muted);margin-left:8px;letter-spacing:0}
 
@@ -149,7 +168,7 @@
 
   @media (max-width:860px){
     .cols{grid-template-columns:1fr}
-    .viewer iframe{height:320px}
+    .viewer .stage{height:320px}
   }
   @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
@@ -157,7 +176,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>ページ編集<span class="ver">rev.5</span></h1>
+    <h1>ページ編集<span class="ver">rev.8</span></h1>
     <div class="count" id="count"></div>
   </header>
 
@@ -219,12 +238,22 @@
         <div class="panel-head">
           <h2>プレビュー</h2>
           <div class="vmode">
+            <button id="pagePrev" class="nav" aria-label="前のページ" title="前のページ（PageUp）">▲</button>
+            <span class="vpage" id="vpage">−&#8202;/&#8202;−</span>
+            <button id="pageNext" class="nav" aria-label="次のページ" title="次のページ（PageDown）">▼</button>
+            <select id="fitMode" aria-label="表示倍率" title="プレビューの表示倍率">
+              <option value="Fit">ページ全体</option>
+              <option value="FitH">幅に合わせる</option>
+            </select>
+            <span class="sep"></span>
             <button id="modeSrc">元のPDF</button>
             <button id="modeOut" class="on">編集結果</button>
             <button id="openTab">別タブで開く</button>
           </div>
         </div>
-        <iframe id="view" title="PDFプレビュー"></iframe>
+        <div class="stage" id="stage" role="img" aria-label="PDFプレビュー">
+          <div class="vmsg" id="vmsg">PDFを読み込むとここに表示されます。</div>
+        </div>
         <div class="vnote" id="vnote"></div>
       </section>
     </div>
@@ -249,6 +278,7 @@
 </div>
 
 <script src="lib/pdf-lib.min.js"></script>
+<script src="lib/pdf.min.js"></script>
 <script>
 (() => {
   const { PDFDocument, degrees } = PDFLib;
@@ -267,6 +297,8 @@
   let outUrl   = null;      // 編集結果の blob URL
   let mode     = 'out';     // 既定は編集結果
   let outDirty = true;
+  let viewPage = 1;         // プレビューで最後に表示させたページ（現在のモードでの番号）
+  let fitMode  = 'Fit';     // 既定は「ページ全体」。再読込のたびにこの倍率に戻す
 
   const setStatus = (msg, kind = '') => {
     statusEl.textContent = msg;
@@ -364,6 +396,7 @@
       $('fname').textContent = srcName;
       $('editor').hidden = false;
       $('dropWrap').hidden = true;
+      viewPage = 1;
       render();
       setMode('out');
       setNote('');
@@ -377,6 +410,8 @@
     if (outUrl && outUrl !== srcUrl) URL.revokeObjectURL(outUrl);
     outUrl = null;
     if (srcUrl) { URL.revokeObjectURL(srcUrl); srcUrl = null; }
+    if (pdfDoc) { try { pdfDoc.destroy(); } catch {} pdfDoc = null; }
+    pageCache.clear();
   }
 
   /* ---------- 並べ替え ---------- */
@@ -506,13 +541,14 @@
     $('summary').innerHTML =
       `選択 <b>${sel.size}</b> ／ 削除 <b>${nDel}</b> ／ 回転 <b>${nRot}</b> ／ 並べ替え <b>${reordered() ? 'あり' : 'なし'}</b> ／ 出力 <b>${nKeep}</b> ページ`;
     $('modeOut').disabled = !nKeep;
+    updateNav();
     updateOut();
   }
 
   function afterEdit() {
-    outDirty = true;
+    outDirty = true;          // 「別タブで開く」用の全ページPDFは作り直しが必要
     render();
-    if (mode === 'out') refreshOut();
+    showPage(viewPage);       // プレビューは1ページだけ作り直すので軽い
   }
 
   /* 操作の適用。skipDeleted=true の操作（回転）は削除済みページを対象から外す。 */
@@ -534,16 +570,148 @@
       + (skipped ? `（削除済みの${skipped}ページは対象外）` : ''), 'ok');
   }
 
-  /* ---------- プレビュー ---------- */
-  // navpanes=0 で Chrome 内蔵ビューアのサムネイル列を閉じる
-  function showPage(n) {
-    const url = mode === 'src' ? srcUrl : outUrl;
-    if (!url) return;
-    $('view').src = `${url}#page=${n}&navpanes=0&view=FitH`;
+  /* ---------- プレビュー ----------
+     ブラウザ内蔵のPDFビューア（iframe）は、URLの #page= を書き換えてもページが動かず、
+     現在ページを問い合わせる手段も無いため、プレビューは pdf.js で canvas に自前描画する。
+     PDFを開くのは1回だけ。ページ送りは canvas の差し替えだけなので再読込が起きない。
+     前後のページを裏で描いてキャッシュしておくので、▲▼ は体感で即座に切り替わる。
+     文書全体を通して見たいときは「別タブで開く」。 */
+  const viewCount = () => (mode === 'src' ? pages.length : kept().length);
+
+  let pdfDoc    = null;          // pdf.js のドキュメント（使い回す）
+  let renderSeq = 0;             // 連打時に古い描画結果を捨てるための番号
+  const pageCache = new Map();   // キー → 描画済み canvas
+  const CACHE_MAX = 10;
+
+  const setVMsg = msg => {
+    const el = $('vmsg');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.hidden = !msg;
+  };
+
+  async function ensurePdfDoc() {
+    if (pdfDoc) return pdfDoc;
+    if (typeof pdfjsLib === 'undefined') throw new Error('lib/pdf.min.js を読み込めていません');
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
+    // pdf.js は渡したバッファを手放せなくなるので、必ず複製を渡す（srcBytes は書き出しでも使う）
+    pdfDoc = await pdfjsLib.getDocument({ data: srcBytes.slice() }).promise;
+    return pdfDoc;
+  }
+
+  // 描画に使える領域（padding 8px ぶんを引く）
+  function stageSize() {
+    const st = $('stage');
+    return { w: Math.max(40, st.clientWidth - 18), h: Math.max(40, st.clientHeight - 18) };
+  }
+
+  // 「元のPDF」では編集の回転を当てない
+  const extraRot = p => (mode === 'out' && p.rot ? p.rot : 0);
+
+  function cacheKey(p) {
+    const { w, h } = stageSize();
+    return `${p.src}:${extraRot(p)}:${fitMode}:${Math.round(w)}x${Math.round(h)}`;
+  }
+
+  async function renderPage(p) {
+    const doc = await ensurePdfDoc();
+    const page = await doc.getPage(p.src + 1);
+    const rotation = (page.rotate + extraRot(p)) % 360;
+    const base = page.getViewport({ scale: 1, rotation });
+    const { w, h } = stageSize();
+    const scale = fitMode === 'Fit'
+      ? Math.min(w / base.width, h / base.height)
+      : w / base.width;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);   // 高解像度画面でもぼけないように
+    const vp = page.getViewport({ scale: Math.max(0.05, scale) * dpr, rotation });
+    const c = document.createElement('canvas');
+    c.width  = Math.max(1, Math.round(vp.width));
+    c.height = Math.max(1, Math.round(vp.height));
+    c.style.width  = Math.round(vp.width / dpr) + 'px';
+    c.style.height = Math.round(vp.height / dpr) + 'px';
+    await page.render({ canvasContext: c.getContext('2d', { alpha: false }), viewport: vp }).promise;
+    return c;
+  }
+
+  function cachePut(key, canvas) {
+    pageCache.set(key, canvas);
+    while (pageCache.size > CACHE_MAX) pageCache.delete(pageCache.keys().next().value);
+  }
+
+  function paint(canvas) {
+    const st = $('stage');
+    [...st.querySelectorAll('canvas')].forEach(c => c.remove());
+    st.appendChild(canvas);
+    st.scrollTop = 0;
+    setVMsg('');
+  }
+
+  async function showPage(n) {
+    const max = viewCount();
+    viewPage = Math.min(Math.max(1, n | 0), Math.max(1, max));
+    updateNav();
+    if (!srcBytes || !max) return;
+    const p = numberMap().get(viewPage);
+    if (!p) return;
+
+    const my = ++renderSeq;
+    const key = cacheKey(p);
+    const hit = pageCache.get(key);
+    if (hit) { paint(hit); prefetch(); return; }
+
+    $('stage').classList.add('busy');
+    try {
+      const c = await renderPage(p);
+      cachePut(key, c);
+      if (my !== renderSeq) return;     // もっと新しい要求が来ていた
+      paint(c);
+    } catch (e) {
+      setVMsg('プレビューを描画できませんでした: ' + (e.message || e));
+    } finally {
+      if (my === renderSeq) $('stage').classList.remove('busy');
+    }
+    prefetch();
+  }
+
+  // 前後のページを裏で描いておく（描くだけで表示はしない）
+  let prefetching = false;
+  function prefetch() {
+    if (prefetching) return;
+    prefetching = true;
+    setTimeout(async () => {
+      try {
+        const map = numberMap();
+        for (const n of [viewPage + 1, viewPage - 1, viewPage + 2]) {
+          const p = map.get(n);
+          if (!p) continue;
+          const key = cacheKey(p);
+          if (pageCache.has(key)) continue;
+          cachePut(key, await renderPage(p));
+        }
+      } catch {}
+      prefetching = false;
+    }, 60);
+  }
+
+  function updateNav() {
+    const max = viewCount();
+    $('vpage').textContent = max ? `${viewPage} / ${max}` : '− / −';
+    $('pagePrev').disabled = !max || viewPage <= 1;
+    $('pageNext').disabled = !max || viewPage >= max;
+  }
+
+  function stepPage(d) {
+    const max = viewCount();
+    if (!max) return;
+    const n = Math.min(Math.max(1, viewPage + d), max);
+    if (n === viewPage) return;
+    cursor = numberMap().get(n) || cursor;   // 編集後も同じページに戻れるように覚えておく
+    showPage(n);
+    setVNote(`${n} ページ目を表示しています。` + baseVNote());
   }
 
   function jumpTo(p) {
-    if (!p) { showPage(1); setVNote(baseVNote()); return; }
+    if (!p) { showPage(viewPage || 1); setVNote(baseVNote()); return; }
     if (mode === 'src') {
       showPage(p.src + 1);
       setVNote(`${p.src + 1} ページ目を表示しています。` + baseVNote());
@@ -565,8 +733,8 @@
 
   function baseVNote() {
     return mode === 'src'
-      ? '編集前の元PDFです。左のページ番号も元PDFの番号で、並べ替えの影響を受けません。'
-      : '削除・回転・並べ替えを適用した結果です。左のページ番号は編集結果の番号と一致します（削除するページは − ）。';
+      ? '編集前の元PDFを1ページずつ表示しています。左のページ番号も元PDFの番号で、並べ替えの影響を受けません。'
+      : '削除・回転・並べ替えを適用した結果を1ページずつ表示しています。左のページ番号は編集結果の番号と一致します（削除するページは − ）。全体を通して見るときや文字を選択したいときは「別タブで開く」。';
   }
 
   function setMode(m) {
@@ -574,8 +742,15 @@
     $('modeSrc').classList.toggle('on', m === 'src');
     $('modeOut').classList.toggle('on', m === 'out');
     render();   // 表示する側に合わせて番号を振り直す
-    if (m === 'out') refreshOut(); else jumpTo(cursor);
+    jumpTo(cursor);
   }
+
+  // 枠の大きさが変わったら描き直す（キャッシュのキーに寸法が入っているので自然に作り直される）
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { if (srcBytes) showPage(viewPage); }, 180);
+  });
 
   /* ---------- 組み立て ---------- */
   async function buildFrom(list) {
@@ -593,23 +768,25 @@
 
   const hasEdits = () => pages.some(p => p.del || p.rot) || reordered();
 
-  async function refreshOut() {
-    if (!hasEdits()) {   // 変更がないうちは元PDFをそのまま見せる（毎回組み直さない）
+  // 「別タブで開く」用に、全ページをつないだPDFのURLを用意する（必要になったときだけ作る）
+  async function ensureOutUrl() {
+    if (!hasEdits()) {   // 変更がないうちは元PDFをそのまま使う
       if (outUrl && outUrl !== srcUrl) URL.revokeObjectURL(outUrl);
       outUrl = srcUrl; outDirty = false;
-      jumpTo(cursor); return;
+      return outUrl;
     }
-    if (!outDirty && outUrl && outUrl !== srcUrl) { jumpTo(cursor); return; }
-    setStatus('プレビューを作成中…');
+    if (!outDirty && outUrl && outUrl !== srcUrl) return outUrl;
+    setStatus('全ページを組み立て中…');
     try {
       const bytes = await buildFrom(kept());
       if (outUrl && outUrl !== srcUrl) URL.revokeObjectURL(outUrl);
       outUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
       outDirty = false;
-      jumpTo(cursor);
       setStatus('');
+      return outUrl;
     } catch (e) {
-      setStatus('プレビューに失敗しました: ' + (e.message || e), 'err');
+      setStatus('組み立てに失敗しました: ' + (e.message || e), 'err');
+      return null;
     }
   }
 
@@ -793,12 +970,14 @@
     setNote('削除・回転・並べ替えをすべて取り消しました。');
   });
 
+  $('pagePrev').addEventListener('click', () => stepPage(-1));
+  $('pageNext').addEventListener('click', () => stepPage(1));
+  $('fitMode').addEventListener('change', e => { fitMode = e.target.value; showPage(viewPage); });
   $('modeSrc').addEventListener('click', () => setMode('src'));
   $('modeOut').addEventListener('click', () => setMode('out'));
   $('openTab').addEventListener('click', async () => {
-    if (mode === 'out' && outDirty) await refreshOut();
-    const url = mode === 'src' ? srcUrl : outUrl;
-    if (url) window.open(url, '_blank');
+    const url = mode === 'src' ? srcUrl : await ensureOutUrl();
+    if (url) window.open(`${url}#page=${viewPage}&view=${fitMode}`, '_blank');
   });
   $('outMode').addEventListener('change', updateOut);
   $('splitArg').addEventListener('input', updateOut);
@@ -807,6 +986,8 @@
   document.addEventListener('keydown', e => {
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) return;
     if ((e.key === 'Delete' || e.key === 'Backspace') && sel.size) { e.preventDefault(); $('opDel').click(); }
+    else if (e.key === 'PageUp') { e.preventDefault(); stepPage(-1); }
+    else if (e.key === 'PageDown') { e.preventDefault(); stepPage(1); }
   });
 })();
 </script>
