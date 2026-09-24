@@ -92,6 +92,12 @@
   .chip .rot{
     position:absolute;left:0;right:0;bottom:1px;font-size:9px;color:var(--accent);font-weight:700;
   }
+  /* 別PDFから差し込んだページ */
+  .chip .doc{
+    position:absolute;top:1px;left:2px;font-size:9px;font-weight:700;color:#7A4B00;
+  }
+  .chip.ext{background:#FFF8EC;border-color:#E3C48A}
+  .chip.ext.sel{background:#F3EEDC;border-color:var(--accent)}
 
   .acts{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:10px}
   .acts .sep{width:1px;height:20px;background:var(--line)}
@@ -176,7 +182,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>ページ編集<span class="ver">rev.8</span></h1>
+    <h1>ページ編集<span class="ver">rev.9</span></h1>
     <div class="count" id="count"></div>
   </header>
 
@@ -207,7 +213,8 @@
           <h2>ページ</h2>
           <div class="hint">
             1回目＝起点／同じページをもう一度＝単独選択／別ページ＝範囲選択<br>
-            ドラッグで並べ替え。番号はプレビューの表示内容に合わせて振り直されます
+            ドラッグで並べ替え。番号はプレビューの表示内容に合わせて振り直されます<br>
+            別PDFから入れたページには B / C … の印が付きます
           </div>
         </div>
         <div class="rangebar">
@@ -228,8 +235,15 @@
           <span class="sep"></span>
           <span class="grp"><button id="moveUp">◀ 前へ</button><button id="moveDown">後ろへ ▶</button></span>
           <span class="sep"></span>
+          <span class="grp">
+            <button id="insBefore">別PDFを前に挿入</button>
+            <button id="insAfter">後ろに挿入</button>
+            <button id="insReplace">選択を差し替え</button>
+          </span>
+          <span class="sep"></span>
           <button id="resetAll">全変更を取消</button>
         </div>
+        <input type="file" id="picker2" accept="application/pdf,.pdf" hidden>
         <div class="summary" id="summary"></div>
         <div class="pnote" id="pnote" role="status" aria-live="polite"></div>
       </section>
@@ -285,11 +299,13 @@
   const $ = id => document.getElementById(id);
   const statusEl = $('status');
 
-  /* ページは配列の「順序」が出力順。各要素は元PDFのどのページかを src で持つ。
-     選択や起点はオブジェクト参照で持つので、並べ替えても壊れない。 */
-  let srcBytes = null;      // Uint8Array（元PDF、変更しない）
+  /* ページは配列の「順序」が出力順。各要素は「どのPDFの何ページ目か」を doc と src で持つ。
+     選択や起点はオブジェクト参照で持つので、並べ替えても壊れない。
+     docs[0] が最初に読み込んだPDF。別PDFを差し込むと docs が増える。 */
+  let docs     = [];        // [{id, label, name, bytes, lib, pdf, count}]
+  let srcBytes = null;      // docs[0].bytes（元PDF、変更しない）
   let srcName  = '';
-  let pages    = [];        // [{src, origRot, rot, del}]
+  let pages    = [];        // [{doc, src, origRot, rot, del}]
   let sel      = new Set(); // ページオブジェクトの集合
   let anchor   = null;      // 1クリック目の起点
   let cursor   = null;      // 最後にクリックしたページ
@@ -312,6 +328,41 @@
   };
   const setVNote = msg => { $('vnote').textContent = msg; };
 
+  /* ---------- 読み込んだPDFの管理 ---------- */
+  const DOC_LABELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  let docSeq = 0;
+  const baseDoc = () => docs[0];
+  const isExt = p => p.doc !== docs[0];
+  const docLabel = d => d.label;
+
+  // PDFを1本読み込んで docs に加え、そのページ配列を返す
+  async function addDoc(file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const lib = await PDFDocument.load(bytes, { ignoreEncryption: true });
+    if (lib.isEncrypted) throw new Error('パスワード保護のため読み込めません');
+    const n = lib.getPageCount();
+    if (!n) throw new Error('ページがありません');
+    const doc = {
+      id: ++docSeq,
+      label: DOC_LABELS[Math.min(docs.length, DOC_LABELS.length - 1)],
+      name: file.name, bytes, lib, pdf: null, count: n,
+    };
+    docs.push(doc);
+    const list = lib.getPages().map((pg, i) => ({
+      doc, src: i,
+      origRot: ((pg.getRotation().angle % 360) + 360) % 360,
+      rot: 0, del: false,
+    }));
+    return { doc, list };
+  }
+
+  // 追加で読み込んだPDFを捨てる（全変更を取消／別PDFを読み込む のとき）
+  function dropExtraDocs() {
+    for (const d of docs.slice(1)) { if (d.pdf) { try { d.pdf.destroy(); } catch {} } }
+    docs.length = Math.min(docs.length, 1);
+    pageCache.clear();
+  }
+
   /* ---------- ページ番号 ----------
      内部は常にページオブジェクト。画面に出す番号だけを、
      いまプレビューしている側の番号に合わせる。
@@ -327,9 +378,10 @@
   }
 
   // 表示番号 → ページオブジェクト
+  // 「元のPDF」では、差し込んだページは元PDFに存在しないので番号を持たない（＝ − ）
   function numberMap() {
     const m = new Map();
-    if (mode === 'src') pages.forEach(p => m.set(p.src + 1, p));
+    if (mode === 'src') pages.forEach(p => { if (!isExt(p)) m.set(p.src + 1, p); });
     else outNumbers().forEach((v, p) => m.set(v, p));
     return m;
   }
@@ -372,24 +424,22 @@
     }
     setStatus('読み込み中…');
     try {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
-      if (doc.isEncrypted) { setStatus('パスワード保護のため編集できません。', 'err'); return; }
-      const n = doc.getPageCount();
-      if (!n) { setStatus('ページがありません。', 'err'); return; }
+      // 先に新しいPDFを読んでから差し替える（失敗しても今の状態を壊さない）
+      const prev = docs;
+      docs = [];
+      let added;
+      try { added = await addDoc(file); }
+      catch (e) { docs = prev; throw e; }
+      revoke(prev);
+      const { doc, list } = added;
+      const n = doc.count;
 
-      srcBytes = bytes;
+      srcBytes = doc.bytes;
       srcName  = file.name;
-      pages = doc.getPages().map((p, i) => ({
-        src: i,
-        origRot: ((p.getRotation().angle % 360) + 360) % 360,
-        rot: 0,
-        del: false,
-      }));
+      pages = list;
       sel.clear(); anchor = null; cursor = null;
 
-      revoke();
-      srcUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+      srcUrl = URL.createObjectURL(new Blob([doc.bytes], { type: 'application/pdf' }));
       outDirty = true; mode = 'out';
       $('outName').value = srcName.replace(/\.pdf$/i, '') + '_edited.pdf';
 
@@ -406,12 +456,65 @@
     }
   }
 
-  function revoke() {
+  function revoke(list = docs) {
     if (outUrl && outUrl !== srcUrl) URL.revokeObjectURL(outUrl);
     outUrl = null;
     if (srcUrl) { URL.revokeObjectURL(srcUrl); srcUrl = null; }
-    if (pdfDoc) { try { pdfDoc.destroy(); } catch {} pdfDoc = null; }
+    for (const d of list) { if (d.pdf) { try { d.pdf.destroy(); } catch {} d.pdf = null; } }
     pageCache.clear();
+  }
+
+  /* ---------- 別PDFの差し込み・差し替え ----------
+     選択ページを基準に、別のPDFのページ全部を入れる。
+     差し替えは、もとのページを「削除」扱いにして新しいページを同じ位置に入れる方式にした。
+     こうすると「削除を取消」で元に戻せるので、取り返しのつかない操作にならない。 */
+  let insertKind = null;   // 'before' | 'after' | 'replace'
+
+  function askInsert(kind) {
+    if (!sel.size) {
+      setNote('先に基準となるページを選んでください（そのページの前／後ろ／位置に入ります）。', 'err');
+      return;
+    }
+    insertKind = kind;
+    $('picker2').click();
+  }
+
+  async function doInsert(file) {
+    const kind = insertKind; insertKind = null;
+    if (!file || !kind) return;
+    if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') {
+      setNote('PDFファイルではありません。', 'err'); return;
+    }
+    if (!sel.size) { setNote('ページが選択されていません。', 'err'); return; }
+
+    setStatus('差し込むPDFを読み込み中…');
+    let added;
+    try {
+      added = await addDoc(file);
+    } catch (e) {
+      setStatus('');
+      setNote(`${file.name} を読み込めません: ${e.message || e}`, 'err');
+      return;
+    }
+    const { doc, list } = added;
+
+    const targets = pages.filter(p => sel.has(p));
+    const first = pages.indexOf(targets[0]);
+    const last  = pages.indexOf(targets[targets.length - 1]);
+    const at = kind === 'after' ? last + 1 : first;
+    if (kind === 'replace') targets.forEach(p => { p.del = true; });
+    pages = [...pages.slice(0, at), ...list, ...pages.slice(at)];
+
+    sel = new Set(list);          // 入れたページを選択状態にしておく
+    anchor = null; cursor = list[0];
+    outDirty = true;
+    if (mode === 'src') setMode('out');   // 差し込んだページは「編集結果」でしか見えない
+    else { render(); jumpTo(cursor); }
+    setStatus('');
+    const where = kind === 'after' ? '後ろ' : kind === 'before' ? '前' : '位置';
+    setNote(`${file.name}（${docLabel(doc)}）の${list.length}ページを、選択した${targets.length}ページの${where}に入れました。`
+      + (kind === 'replace'
+        ? `もとの${targets.length}ページは削除扱いです（「削除を取消」で戻せます）。` : ''), 'ok');
   }
 
   /* ---------- 並べ替え ---------- */
@@ -461,7 +564,12 @@
       : `1ページを${dir < 0 ? '前' : '後ろ'}へ移動しました。`, 'ok');
   }
 
-  const reordered = () => pages.some((p, i) => p.src !== i);
+  // 元PDFのページだけを見て、並び順が変わっているかを判定する
+  const reordered = () => {
+    const base = pages.filter(p => !isExt(p));
+    return base.some((p, i) => p.src !== i);
+  };
+  const insertedCount = () => pages.filter(p => isExt(p)).length;
 
   /* ---------- 表示 ---------- */
   let dragging = null;
@@ -474,13 +582,21 @@
       const b = document.createElement('button');
       b.type = 'button';
       b.draggable = true;
+      const ext = isExt(p);
       b.className = 'chip' + (sel.has(p) ? ' sel' : '') + (p.del ? ' del' : '')
-                  + (anchor === p ? ' anchor' : '');
-      b.textContent = mode === 'src' ? String(p.src + 1) : (no.has(p) ? String(no.get(p)) : '−');
+                  + (ext ? ' ext' : '') + (anchor === p ? ' anchor' : '');
+      b.textContent = mode === 'src'
+        ? (ext ? '−' : String(p.src + 1))
+        : (no.has(p) ? String(no.get(p)) : '−');
       b.setAttribute('aria-pressed', sel.has(p) ? 'true' : 'false');
-      b.title = `元のPDF ${p.src + 1}ページ`
+      b.title = (ext ? `${p.doc.name}（${docLabel(p.doc)}） ${p.src + 1}ページ` : `元のPDF ${p.src + 1}ページ`)
         + (p.del ? ' / 削除' : ` / 編集結果 ${no.get(p)}ページ目`)
         + (p.rot ? ` / ${p.rot}°回転` : '');
+      if (ext) {
+        const d = document.createElement('span');
+        d.className = 'doc'; d.textContent = docLabel(p.doc);
+        b.appendChild(d);
+      }
       if (p.rot) {
         const r = document.createElement('span');
         r.className = 'rot'; r.textContent = p.rot + '°';
@@ -536,11 +652,15 @@
 
     const nDel = pages.filter(p => p.del).length;
     const nRot = pages.filter(p => !p.del && p.rot).length;
+    const nIns = insertedCount();
     const nKeep = pages.length - nDel;
     $('count').textContent = pages.length ? `${pages.length}ページ → ${nKeep}ページ` : '';
     $('summary').innerHTML =
-      `選択 <b>${sel.size}</b> ／ 削除 <b>${nDel}</b> ／ 回転 <b>${nRot}</b> ／ 並べ替え <b>${reordered() ? 'あり' : 'なし'}</b> ／ 出力 <b>${nKeep}</b> ページ`;
+      `選択 <b>${sel.size}</b> ／ 削除 <b>${nDel}</b> ／ 回転 <b>${nRot}</b>`
+      + ` ／ 差し込み <b>${nIns}</b> ／ 並べ替え <b>${reordered() ? 'あり' : 'なし'}</b>`
+      + ` ／ 出力 <b>${nKeep}</b> ページ`;
     $('modeOut').disabled = !nKeep;
+    for (const id of ['insBefore', 'insAfter', 'insReplace']) $(id).disabled = !sel.size;
     updateNav();
     updateOut();
   }
@@ -576,9 +696,9 @@
      PDFを開くのは1回だけ。ページ送りは canvas の差し替えだけなので再読込が起きない。
      前後のページを裏で描いてキャッシュしておくので、▲▼ は体感で即座に切り替わる。
      文書全体を通して見たいときは「別タブで開く」。 */
-  const viewCount = () => (mode === 'src' ? pages.length : kept().length);
+  // 「元のPDF」では差し込んだページは数に入らない（元PDFに存在しないため）
+  const viewCount = () => (mode === 'src' ? pages.filter(p => !isExt(p)).length : kept().length);
 
-  let pdfDoc    = null;          // pdf.js のドキュメント（使い回す）
   let renderSeq = 0;             // 連打時に古い描画結果を捨てるための番号
   const pageCache = new Map();   // キー → 描画済み canvas
   const CACHE_MAX = 10;
@@ -590,13 +710,14 @@
     el.hidden = !msg;
   };
 
-  async function ensurePdfDoc() {
-    if (pdfDoc) return pdfDoc;
+  // 差し込んだPDFもそれぞれ pdf.js で開く（開くのは1本につき1回だけ）
+  async function ensurePdfDoc(doc) {
+    if (doc.pdf) return doc.pdf;
     if (typeof pdfjsLib === 'undefined') throw new Error('lib/pdf.min.js を読み込めていません');
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
-    // pdf.js は渡したバッファを手放せなくなるので、必ず複製を渡す（srcBytes は書き出しでも使う）
-    pdfDoc = await pdfjsLib.getDocument({ data: srcBytes.slice() }).promise;
-    return pdfDoc;
+    // pdf.js は渡したバッファを手放せなくなるので、必ず複製を渡す（bytes は書き出しでも使う）
+    doc.pdf = await pdfjsLib.getDocument({ data: doc.bytes.slice() }).promise;
+    return doc.pdf;
   }
 
   // 描画に使える領域（padding 8px ぶんを引く）
@@ -610,11 +731,11 @@
 
   function cacheKey(p) {
     const { w, h } = stageSize();
-    return `${p.src}:${extraRot(p)}:${fitMode}:${Math.round(w)}x${Math.round(h)}`;
+    return `${p.doc.id}:${p.src}:${extraRot(p)}:${fitMode}:${Math.round(w)}x${Math.round(h)}`;
   }
 
   async function renderPage(p) {
-    const doc = await ensurePdfDoc();
+    const doc = await ensurePdfDoc(p.doc);
     const page = await doc.getPage(p.src + 1);
     const rotation = (page.rotate + extraRot(p)) % 360;
     const base = page.getViewport({ scale: 1, rotation });
@@ -713,6 +834,14 @@
   function jumpTo(p) {
     if (!p) { showPage(viewPage || 1); setVNote(baseVNote()); return; }
     if (mode === 'src') {
+      if (isExt(p)) {   // 差し込んだページは元PDFに無いので、手前の元PDFページを出す
+        let n = 0;
+        for (const q of pages) { if (!isExt(q)) n++; if (q === p) break; }
+        showPage(Math.max(1, n));
+        setVNote(`このページは差し込んだ ${p.doc.name}（${docLabel(p.doc)}）の ${p.src + 1} ページ目で、元のPDFにはありません。`
+          + `「編集結果」に切り替えると表示できます。`);
+        return;
+      }
       showPage(p.src + 1);
       setVNote(`${p.src + 1} ページ目を表示しています。` + baseVNote());
       return;
@@ -733,7 +862,7 @@
 
   function baseVNote() {
     return mode === 'src'
-      ? '編集前の元PDFを1ページずつ表示しています。左のページ番号も元PDFの番号で、並べ替えの影響を受けません。'
+      ? '編集前の元PDFを1ページずつ表示しています。左のページ番号も元PDFの番号で、並べ替えの影響を受けません（差し込んだページは元PDFに無いので − ）。'
       : '削除・回転・並べ替えを適用した結果を1ページずつ表示しています。左のページ番号は編集結果の番号と一致します（削除するページは − ）。全体を通して見るときや文字を選択したいときは「別タブで開く」。';
   }
 
@@ -755,10 +884,19 @@
   /* ---------- 組み立て ---------- */
   async function buildFrom(list) {
     if (!list.length) throw new Error('ページがありません');
-    const src = await PDFDocument.load(srcBytes, { ignoreEncryption: true });
     const out = await PDFDocument.create();
-    const copied = await out.copyPages(src, list.map(p => p.src));
-    copied.forEach((pg, k) => {
+    // copyPages はドキュメント単位なので、PDFごとにまとめて取り出してから元の順に並べ直す
+    const byDoc = new Map();
+    list.forEach((st, k) => {
+      if (!byDoc.has(st.doc)) byDoc.set(st.doc, []);
+      byDoc.get(st.doc).push(k);
+    });
+    const slots = new Array(list.length);
+    for (const [doc, ks] of byDoc) {
+      const copied = await out.copyPages(doc.lib, ks.map(k => list[k].src));
+      copied.forEach((pg, i) => { slots[ks[i]] = pg; });
+    }
+    slots.forEach((pg, k) => {
       const st = list[k];
       if (st.rot) pg.setRotation(degrees((st.origRot + st.rot) % 360));
       out.addPage(pg);
@@ -766,7 +904,7 @@
     return await out.save();
   }
 
-  const hasEdits = () => pages.some(p => p.del || p.rot) || reordered();
+  const hasEdits = () => pages.some(p => p.del || p.rot) || reordered() || insertedCount() > 0;
 
   // 「別タブで開く」用に、全ページをつないだPDFのURLを用意する（必要になったときだけ作る）
   async function ensureOutUrl() {
@@ -962,12 +1100,18 @@
   $('rot0').addEventListener('click', () => apply(p => { p.rot = 0; }, '回転リセット', true));
   $('moveUp').addEventListener('click', () => nudge(-1));
   $('moveDown').addEventListener('click', () => nudge(1));
+  $('insBefore').addEventListener('click', () => askInsert('before'));
+  $('insAfter').addEventListener('click', () => askInsert('after'));
+  $('insReplace').addEventListener('click', () => askInsert('replace'));
+  $('picker2').addEventListener('change', e => { doInsert(e.target.files[0]); e.target.value = ''; });
   $('resetAll').addEventListener('click', () => {
+    dropExtraDocs();                       // 差し込んだPDFを捨てる
+    pages = pages.filter(p => !isExt(p));
     pages.sort((a, b) => a.src - b.src);
     pages.forEach(p => { p.del = false; p.rot = 0; });
-    sel.clear(); anchor = null;
+    sel.clear(); anchor = null; cursor = null;
     afterEdit();
-    setNote('削除・回転・並べ替えをすべて取り消しました。');
+    setNote('削除・回転・並べ替え・差し込みをすべて取り消しました。');
   });
 
   $('pagePrev').addEventListener('click', () => stepPage(-1));
