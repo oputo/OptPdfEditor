@@ -182,7 +182,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>ページ編集<span class="ver">rev.9</span></h1>
+    <h1>ページ編集<span class="ver">rev.10</span></h1>
     <div class="count" id="count"></div>
   </header>
 
@@ -710,13 +710,25 @@
     el.hidden = !msg;
   };
 
+  const PDFJS_ASSET = {
+    cmaps: new URL('lib/cmaps/', location.href).href,
+    fonts: new URL('lib/standard_fonts/', location.href).href,
+  };
+
   // 差し込んだPDFもそれぞれ pdf.js で開く（開くのは1本につき1回だけ）
   async function ensurePdfDoc(doc) {
     if (doc.pdf) return doc.pdf;
     if (typeof pdfjsLib === 'undefined') throw new Error('lib/pdf.min.js を読み込めていません');
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
     // pdf.js は渡したバッファを手放せなくなるので、必ず複製を渡す（bytes は書き出しでも使う）
-    doc.pdf = await pdfjsLib.getDocument({ data: doc.bytes.slice() }).promise;
+    // cMap / 標準フォント: フォント未埋め込みの日本語PDFや Base14 フォントを表示するのに必要。
+    // file:// ではブラウザが読み込みを止めるため効かない（HTTP(S) で配信したときに有効）
+    doc.pdf = await pdfjsLib.getDocument({
+      data: doc.bytes.slice(),
+      cMapUrl: PDFJS_ASSET.cmaps,
+      cMapPacked: true,
+      standardFontDataUrl: PDFJS_ASSET.fonts,
+    }).promise;
     return doc.pdf;
   }
 

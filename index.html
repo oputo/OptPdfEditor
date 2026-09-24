@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OptPdfEditor</title>
+<meta name="description" content="ブラウザだけで完結するPDF結合・ページ編集・zip→PDF変換ツール">
 <style>
   :root{
     --bg:#E6E9EC; --sheet:#FFFFFF; --ink:#1E2830; --muted:#66727C;
@@ -52,10 +53,14 @@
   .note h3{font-size:13px;margin:0 0 6px;color:var(--ink)}
   .note ul{margin:0;padding-left:1.2em}
   .note a{color:var(--accent)}
+  .site{font-size:12px;margin-bottom:6px}
+  .site a{color:var(--muted);text-decoration:none}
+  .site a:hover{color:var(--accent);text-decoration:underline}
 </style>
 </head>
 <body>
 <div class="wrap">
+  <div class="site"><a href="/">← oputo / Optアプリシリーズ</a></div>
   <header>
     <h1>OptPdfEditor</h1>
     <div class="count">ブラウザだけで完結・ファイルは外に出ません</div>
@@ -86,7 +91,8 @@
   <div class="note">
     <h3>メモ</h3>
     <ul>
-      <li>処理はすべてブラウザ内（pdf-lib / JSZip）で行われ、ファイルはネットワークに送信されません。</li>
+      <li>処理はすべてブラウザ内で行われ、選んだファイルがサーバーへ送信されることはありません（ページとライブラリの読み込みだけ通信します）。</li>
+      <li>使用ライブラリ: pdf-lib（PDF生成・編集）/ pdf.js（プレビュー）/ JSZip（zip展開）/ fontkit・harfbuzz（日本語フォントの埋め込み）/ BIZ UDGothic（フォント）。ライセンスは <code>lib/</code> 内の各 LICENSE ファイルを参照。</li>
       <li>保存はファイル保存ダイアログが使える環境ではダイアログ、使えない環境ではダウンロードになります。</li>
       <li>ソース: <a href="https://github.com/oputo/OptPdfEditor">github.com/oputo/OptPdfEditor</a></li>
     </ul>
